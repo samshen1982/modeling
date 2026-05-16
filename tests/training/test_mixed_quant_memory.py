@@ -78,3 +78,42 @@ def test_dense_model_unaffected_by_routed_dtype():
     mb_bf16 = memory_breakdown(g, m_bf16, sys_, st)
     mb_fp4 = memory_breakdown(g, m_fp4, sys_, st)
     assert mb_bf16.weights == mb_fp4.weights
+
+
+def test_ep_a2a_buffer_uses_routed_compute_dtype():
+    """EP A2A staging buffer should scale with routed_expert_compute_dtype."""
+    g = Graph()
+    sys_ = _make_system()
+    st = Strategy(ep=4, dp=1, optimizer=OptKind.ADAM)
+    m_bf16 = _moe_model()
+    m_fp8 = _moe_model(routed_expert_compute_dtype=Dtype.FP8_E4M3)
+    mb_bf16 = memory_breakdown(g, m_bf16, sys_, st)
+    mb_fp8  = memory_breakdown(g, m_fp8,  sys_, st)
+    # Comm buffers shrink when routed compute dtype shrinks
+    # (4× staging × seq_cp × hidden × act_bytes × n_moe).
+    assert mb_fp8.comm_buffers < mb_bf16.comm_buffers
+
+
+def test_cp_a2a_buffer_uses_attn_act_dtype():
+    g = Graph()
+    sys_ = _make_system()
+    st = Strategy(cp=4, dp=1, optimizer=OptKind.ADAM)
+    m_bf16 = _moe_model()
+    m_fp8_attn = _moe_model(attn_act_dtype=Dtype.FP8_E4M3)
+    mb_bf16 = memory_breakdown(g, m_bf16, sys_, st)
+    mb_fp8  = memory_breakdown(g, m_fp8_attn, sys_, st)
+    assert mb_fp8.comm_buffers < mb_bf16.comm_buffers
+
+
+def test_qk_score_matrix_uses_attn_act_dtype():
+    """Activations: QK^T score matrix term (~5·a·s²·bytes) should
+    scale with attn_act_dtype when present."""
+    g = Graph()
+    sys_ = _make_system()
+    st = Strategy(optimizer=OptKind.ADAM)
+    # Force long sequence so QK^T dominates
+    m_bf16 = _moe_model(seq_len=1024, num_heads=16)
+    m_fp8 = _moe_model(seq_len=1024, num_heads=16, attn_act_dtype=Dtype.FP8_E4M3)
+    mb_bf16 = memory_breakdown(g, m_bf16, sys_, st)
+    mb_fp8 = memory_breakdown(g, m_fp8, sys_, st)
+    assert mb_fp8.activations < mb_bf16.activations

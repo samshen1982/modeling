@@ -406,7 +406,8 @@ def _activation_memory(
         # attention recompute is to avoid materializing this score matrix).
         if not attn_recomputed:
             num_heads = max(1, getattr(model, "num_heads", 1))
-            layer_act += 5 * num_heads * s * s * act_bytes
+            attn_bytes = model.effective_attn_act_dtype().bytes
+            layer_act += 5 * num_heads * s * s * attn_bytes
 
         layer_act = layer_act // total_seq_shard
         hc_layer = hc_layer // total_seq_shard
@@ -483,7 +484,9 @@ def _comm_buffer_memory(model: ModelSpec, strategy: Strategy) -> int:
     if strategy.cp > 1:
         seq_cp = s // strategy.cp
         h_tp = h // strategy.tp if strategy.tp > 1 else h
-        per_layer_cp = 4 * seq_cp * h_tp * act_bytes
+        # CP A2A buffers shuttle attention activations across the sequence dim.
+        cp_bytes = model.effective_attn_act_dtype().bytes
+        per_layer_cp = 4 * seq_cp * h_tp * cp_bytes
         total += per_layer_cp * n_layers * strategy.micro_batch
 
     # EP A2A buffers (only when EP>1, MoE layers only)
@@ -492,7 +495,9 @@ def _comm_buffer_memory(model: ModelSpec, strategy: Strategy) -> int:
     if strategy.ep > 1 and model.num_experts > 0:
         seq_cp = s // strategy.cp if strategy.cp > 1 else s
         h_tp = h // strategy.tp if strategy.tp > 1 else h
-        per_layer_ep = 4 * seq_cp * h_tp * act_bytes
+        # EP dispatch/combine carries routed-expert activations.
+        ep_bytes = model.routed_expert_compute_dtype.bytes
+        per_layer_ep = 4 * seq_cp * h_tp * ep_bytes
         n_moe = sum(1 for lk in model.layers if lk.value == "moe")
         if strategy.pp > 1:
             n_moe = max(1, n_moe // strategy.pp)

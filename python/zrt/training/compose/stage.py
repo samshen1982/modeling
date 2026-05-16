@@ -123,15 +123,36 @@ def op_to_time_hetero(
     return max(compute_t, memory_t)
 
 
+def _resolve_compute_dtype(op: Op, model: ModelSpec) -> Dtype:
+    """Map ``op.component`` to its compute dtype, falling back to act_dtype.
+
+    Used by stage.py to per-op-dispatch compute dtypes in mixed-quant
+    configurations (FP8 attention with BF16 norms, FP4 routed experts with
+    BF16 shared experts, etc.). Embedding and norm components are always
+    BF16 — they have negligible compute cost and quantizing them is
+    numerically unstable.
+    """
+    comp = getattr(op, "component", None)
+    if comp == "attention":
+        return model.attn_compute_dtype
+    if comp == "routed_expert":
+        return model.routed_expert_compute_dtype
+    if comp == "shared_expert":
+        return model.shared_expert_compute_dtype
+    if comp in ("embedding", "norm"):
+        return Dtype.BF16
+    return model.act_dtype
+
+
 def _cost_phase_time(
     cost: OpCost, phase: str, system: SystemSpec,
-    gpu_name: str, overlap: float = 0.0,
+    gpu_name: str, overlap: float = 0.0, dtype: Dtype = Dtype.BF16,
 ) -> float:
     """Compute time for one phase (fwd/dx/dw) using heterogeneous roofline."""
     cube = getattr(cost, f"{phase}_cube_flops")
     vector = getattr(cost, f"{phase}_vector_flops")
     bytes_ = getattr(cost, f"{phase}_bytes")
-    return op_to_time_hetero(cube, vector, bytes_, system, gpu_name,
+    return op_to_time_hetero(cube, vector, bytes_, system, gpu_name, dtype,
                              overlap_ratio=overlap)
 
 
@@ -153,9 +174,10 @@ def stage_time(
     for op in stage_ops:
         cost = op_cost(op, model, system)
         overlap = gpu.overlap_ratio.get(op.kind, 0.0)
-        fwd_t = _cost_phase_time(cost, "fwd", system, gpu_name, overlap)
-        dx_t  = _cost_phase_time(cost, "dx",  system, gpu_name, overlap)
-        dw_t  = _cost_phase_time(cost, "dw",  system, gpu_name, overlap)
+        op_dtype = _resolve_compute_dtype(op, model)
+        fwd_t = _cost_phase_time(cost, "fwd", system, gpu_name, overlap, op_dtype)
+        dx_t  = _cost_phase_time(cost, "dx",  system, gpu_name, overlap, op_dtype)
+        dw_t  = _cost_phase_time(cost, "dw",  system, gpu_name, overlap, op_dtype)
         t_fwd    += fwd_t
         t_bwd_dx += dx_t
         t_bwd_dw += dw_t

@@ -80,6 +80,7 @@ def estimate(
         pipeline_time_ms=s.pipeline_time * 1000,
         mfu=s.mfu,
         hfu=s.hfu,
+        mfu_native=s.mfu_native,
         memory=s.memory,
         per_stage=s.per_stage,
         total_flops=total_flops,

@@ -67,6 +67,7 @@ class TrainingReport:
     # Efficiency metrics
     mfu: float = 0.0
     hfu: float = 0.0
+    mfu_native: float = 0.0   # MFU vs dtype-weighted effective peak
 
     # FLOPs breakdown
     total_flops: float = 0.0  # [Stack A]

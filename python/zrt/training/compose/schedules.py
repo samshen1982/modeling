@@ -179,6 +179,7 @@ class OneF1BComposer(PipelineComposer):
                 steady=step * M,
                 cooldown=0.0,
                 dp_exposed=dp_exposed,
+                dp_hidden=hidden,
                 schedule_name="1f1b",
                 warmup_steps=0,
                 cooldown_steps=0,
@@ -220,6 +221,7 @@ class OneF1BComposer(PipelineComposer):
             steady=steady,
             cooldown=cooldown,
             dp_exposed=dp_exposed,
+            dp_hidden=hidden,
             schedule_name="1f1b",
             warmup_steps=pp - 1,
             cooldown_steps=pp - 1,
@@ -283,6 +285,7 @@ class Interleaved1F1BComposer(PipelineComposer):
             steady=steady,
             cooldown=cooldown,
             dp_exposed=dp_exposed,
+            dp_hidden=hidden,
             schedule_name="i1f1b",
             warmup_steps=max(1, -(-(pp - 1) // V)),
             cooldown_steps=max(1, -(-(pp - 1) // V)),
@@ -341,6 +344,7 @@ class DualPipeComposer(PipelineComposer):
             steady=steady,
             cooldown=cooldown,
             dp_exposed=dp_exposed,
+            dp_hidden=hidden,
             schedule_name="dualpipe",
             warmup_steps=max(1, -(-(pp - 1) // 2)),
             cooldown_steps=max(1, -(-(pp - 1) // 2)),
@@ -398,6 +402,7 @@ class DualPipeVComposer(PipelineComposer):
             steady=steady,
             cooldown=cooldown,
             dp_exposed=dp_exposed,
+            dp_hidden=hidden,
             schedule_name="dualpipev",
             warmup_steps=max(1, -(-(pp - 1) // (2 * V))),
             cooldown_steps=max(1, -(-(pp - 1) // (2 * V))),
@@ -468,6 +473,7 @@ class ZeroBubbleComposer(PipelineComposer):
             steady=steady,
             cooldown=cooldown,
             dp_exposed=dp_exposed,
+            dp_hidden=hidden,
             schedule_name="zb",
             warmup_steps=pp - 1,
             cooldown_steps=pp - 1,
@@ -585,6 +591,7 @@ def pipeline_step_time(
         step.warmup = residual_bubble / 2.0
         step.cooldown = new_cooldown
         step.dp_exposed = new_dp_exposed
+        step.dp_hidden = max(0.0, dp_ar_time - new_dp_exposed)
         step.bubble_fraction = residual_bubble / step.step_time if step.step_time > 0 else 0.0
 
     # === Communication and compute breakdown ===
@@ -673,7 +680,8 @@ def pipeline_step_time(
     # step.dp_exposed already set by composer / dual-batch
 
     # ── Hidden comm ───────────────────────────────────────────────────────
-    # DP AR hidden in pipeline bubble — independent, exact.
+    # DP AR hidden in pipeline bubble — set by composer (and updated by
+    # dual-batch above). Verify the invariant: dp_hidden = dp_ar_time - dp_exposed.
     step.dp_hidden = max(0.0, dp_ar_time - step.dp_exposed)
 
     # EP hidden by wave-overlap — from StageTime.ep_hidden, scaled to critical path.

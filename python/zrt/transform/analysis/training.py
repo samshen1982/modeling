@@ -403,6 +403,8 @@ class PipelineStepMetrics:
     exposed_comm_ms: float = 0.0
     hidden_comm_ms: float = 0.0
     total_comm_ms: float = 0.0
+    dp_exposed_ms: float = 0.0
+    dp_hidden_ms: float = 0.0
 
     def to_dict(self) -> dict[str, float]:
         return {
@@ -417,6 +419,8 @@ class PipelineStepMetrics:
             "exposed_comm_ms": self.exposed_comm_ms,
             "hidden_comm_ms": self.hidden_comm_ms,
             "total_comm_ms": self.total_comm_ms,
+            "dp_exposed_ms": self.dp_exposed_ms,
+            "dp_hidden_ms": self.dp_hidden_ms,
         }
 
 
@@ -672,6 +676,8 @@ class TrainingPipelinePass(GraphPass):
             exposed_comm_ms=exposed_comm_ms,
             hidden_comm_ms=hidden_comm_ms,
             total_comm_ms=total_comm_ms,
+            dp_exposed_ms=step_result.dp_exposed * 1000.0,
+            dp_hidden_ms=step_result.dp_hidden * 1000.0,
         )
 
         g.metadata["pipeline_metrics"] = metrics

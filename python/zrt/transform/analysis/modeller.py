@@ -199,6 +199,8 @@ def estimate_training_from_graphs(
     exposed_comm_ms = pipeline_metrics.exposed_comm_ms if pipeline_metrics else 0.0
     hidden_comm_ms = pipeline_metrics.hidden_comm_ms if pipeline_metrics else 0.0
     total_comm_ms = pipeline_metrics.total_comm_ms if pipeline_metrics else 0.0
+    dp_exposed_from_metrics = pipeline_metrics.dp_exposed_ms if pipeline_metrics else 0.0
+    dp_hidden_from_metrics = pipeline_metrics.dp_hidden_ms if pipeline_metrics else 0.0
 
     parallel = ctx.parallel
     training = ctx.training
@@ -244,9 +246,6 @@ def estimate_training_from_graphs(
     compute_time_ms = 0.0
     fwd_compute_ms = 0.0
     bwd_compute_ms = 0.0
-    exposed_comm_ms = 0.0
-    total_comm_volume_ms = 0.0
-    hidden_comm_ms = 0.0
 
     try:
         from python.zrt.executor.scheduler import DAGScheduler
@@ -256,10 +255,6 @@ def estimate_training_from_graphs(
         if schedule_graph is not None and ctx.hw_spec is not None:
             tl = DAGScheduler(ctx.hw_spec).schedule(schedule_graph)
             compute_time_ms = tl.compute_time_us / 1000.0
-            total_comm_volume_ms = tl.comm_time_us / 1000.0
-            exposed_comm_us = max(0.0, tl.comm_time_us - tl.overlap_us)
-            exposed_comm_ms = exposed_comm_us / 1000.0
-            hidden_comm_ms = tl.overlap_us / 1000.0
 
             # Per-phase compute split
             fwd_compute_us = sum(op.latency_us for op in tl.scheduled_ops if op.stream_type == "compute" and op.phase == "fwd")
@@ -424,7 +419,7 @@ def estimate_training_from_graphs(
         warmup_ms=warmup_ms,
         steady_ms=steady_ms,
         cooldown_ms=cooldown_ms,
-        dp_exposed_ms=dp_exposed_ms,
+        dp_exposed_ms=dp_exposed_from_metrics if dp_exposed_from_metrics > 0 else dp_exposed_ms,
         optimizer_time_ms=optimizer_time_ms,
         optimizer_comm_ms=optimizer_comm_ms,
 
@@ -445,7 +440,6 @@ def estimate_training_from_graphs(
         compute_time_ms=compute_time_ms,
         fwd_compute_ms=fwd_compute_ms,
         bwd_compute_ms=bwd_compute_ms,
-        exposed_comm_ms=exposed_comm_ms,
 
         # Per-group exposed comm
         tp_exposed_ms=tp_exposed_ms,
@@ -454,12 +448,8 @@ def estimate_training_from_graphs(
         pp_exposed_ms=pp_exposed_ms,
 
         # Hidden comm
-        hidden_comm_ms=hidden_comm_ms,
-        dp_hidden_ms=max(0.0, hidden_comm_ms - (tp_hidden_ms if 'tp_hidden_ms' in locals() else 0.0)),
+        dp_hidden_ms=dp_hidden_from_metrics if dp_hidden_from_metrics > 0 else max(0.0, hidden_comm_ms - (tp_hidden_ms if 'tp_hidden_ms' in locals() else 0.0)),
         tp_hidden_ms=0.0,
-
-        # Total comm volume
-        total_comm_volume_ms=total_comm_volume_ms,
 
         # Config / model
         warnings=[],

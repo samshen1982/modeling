@@ -138,6 +138,10 @@ class Strategy:
     ep_overlap: bool = False
     dualbatch: bool = False
     dp_overlap_in_bubble: bool = True
+    # Fraction of steady-state backward compute that DP grad-reduce can overlap
+    # (FSDP / Megatron grad bucket scheduling). 0.0 = legacy cooldown-only window;
+    # 0.5 = conservative default; 1.0 = idealized full overlap.
+    dp_steady_overlap_ratio: float = 0.5
 
     # optimizer
     optimizer: OptKind = OptKind.ADAM

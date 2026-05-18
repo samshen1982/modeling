@@ -634,8 +634,12 @@ def recompute_overhead_flops(
             if op.kind in FA_KERNEL_KINDS:
                 continue
             cost = op_cost(op, model, system)
-            if _is_compute_bound(cost, "fwd", system):
-                extra += _accounted_flops(cost, "fwd")
+            # Mirror _recompute_time (compose/stage.py) which counts the
+            # actual recompute time including memory-bound ops. The previous
+            # _is_compute_bound gate dropped low-AI ops like mhc_pre /
+            # mhc_post (AI<10 vs B300 ridge=625), so HFU stayed equal to MFU
+            # while step time grew — accounting drift between the two sides.
+            extra += _accounted_flops(cost, "fwd")
 
     M = strategy.num_microbatches()
     return extra * M

@@ -108,6 +108,60 @@ def test_recompute_excluded_from_bwd_compute_invariant():
     )
 
 
+def test_recompute_raw_zero_without_policy():
+    model, system = _model(), _system()
+    strategy = Strategy(tp=1, pp=1, dp=1, micro_batch=1, global_batch=4)
+    graph = build_graph(model, strategy)
+
+    step = pipeline_step_time(graph, model, system, strategy)
+
+    assert step.recompute_time_raw == 0.0
+
+
+def _moe_bottleneck_model():
+    """3 dense + 13 heavy-MoE layers; small dense attention so a MoE stage
+    gates the pipeline (mirrors the DeepSeek-style report the user hit)."""
+    return ModelSpec(
+        hidden=4096, ffn=8192, num_heads=16, num_kv_heads=4, head_dim=128,
+        vocab=32000, seq_len=512,
+        layers=[LayerKind.DENSE] * 3 + [LayerKind.MOE] * 13,
+        num_experts=256, top_k=8, moe_ffn=8192, n_shared_experts=2,
+    )
+
+
+def test_dense_recompute_pipeline_hidden_raw_visible():
+    """User-reported case: PP=16 MoE model, recompute only on dense.
+
+    Dense recompute runs inside a non-bottleneck stage → critical-path
+    recompute_time == 0 (correctly, step_time is unchanged), but the raw
+    magnitude must still be > 0 so the user can see recompute is active.
+    """
+    model, system = _moe_bottleneck_model(), _system()
+    common = dict(tp=4, cp=1, pp=16, ep=1, dp=2,
+                  micro_batch=1, global_batch=32)
+    rc = Strategy(**common,
+                  recompute=RecomputePolicy(per_layer={"dense": {"attn_block"}}))
+    no_rc = Strategy(**common)
+
+    g_rc = build_graph(model, rc)
+    g_no = build_graph(model, no_rc)
+    s_rc = pipeline_step_time(g_rc, model, system, rc)
+    s_no = pipeline_step_time(g_no, model, system, no_rc)
+
+    # Some non-bottleneck (dense) stage actually did the recompute work.
+    assert max(st.recompute for st in s_rc.per_stage) > 0.0
+    # It is hidden behind the heavier MoE stage → 0 on the critical path,
+    # and step_time is unchanged vs. no recompute.
+    assert s_rc.recompute_time == 0.0
+    assert s_rc.step_time == pytest.approx(s_no.step_time, rel=1e-9)
+    # But the raw magnitude is visible and positive.
+    assert s_rc.recompute_time_raw > 0.0
+    # Invariant still holds with the critical-path term only.
+    assert s_rc.compute_time == pytest.approx(
+        s_rc.fwd_compute + s_rc.bwd_compute + s_rc.recompute_time, rel=1e-6
+    )
+
+
 def test_recompute_attribution_preserves_step_time():
     """Turning the attribution on must not change step_time vs. the value
     the composer timeline produces (recompute stays on the bwd critical

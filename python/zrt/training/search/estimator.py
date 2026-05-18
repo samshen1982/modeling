@@ -116,6 +116,7 @@ def estimate(
         fwd_compute_ms=s.fwd_compute * 1000,
         bwd_compute_ms=s.bwd_compute * 1000,
         recompute_time_ms=s.recompute_time * 1000,
+        recompute_time_raw_ms=s.recompute_time_raw * 1000,
         exposed_comm_ms=s.exposed_comm * 1000,
         tp_exposed_ms=s.tp_exposed * 1000,
         cp_exposed_ms=s.cp_exposed * 1000,

@@ -91,6 +91,11 @@ class StepResult:
     recompute_time: float = 0.0     # Activation-recompute fwd-redo on critical path.
                                     # 0 with no recompute policy; >0 for full/selective.
                                     # Part of compute_time, attributed out of bwd_compute.
+    recompute_time_raw: float = 0.0  # Raw recompute magnitude = M × max-over-stages
+                                    # per-mb recompute. NOT in step_time / compute_time:
+                                    # when the recomputed stage is not the pipeline
+                                    # bottleneck this work is hidden and recompute_time
+                                    # (critical-path) is 0 while this stays > 0.
     exposed_comm: float = 0.0       # Comm on critical path = Σ *_exposed fields
 
     # Per-group exposed comm (Σ = exposed_comm)
@@ -731,6 +736,16 @@ def pipeline_step_time(
         step.bwd_compute -= step.recompute_time
     else:
         step.recompute_time = 0.0
+
+    # Raw recompute magnitude: M × the heaviest recomputed stage's per-mb
+    # recompute. This is what recompute "costs" in compute regardless of
+    # whether the pipeline hides it. When the recomputed stage is NOT the
+    # bottleneck, recompute_time (critical path, above) is 0 while this is
+    # > 0 — the work runs inside a faster stage and adds nothing to
+    # step_time. Intentionally NOT part of step_time / compute_time.
+    step.recompute_time_raw = M * max(
+        (st.recompute for st in stage_times), default=0.0
+    )
 
     # ── Hidden comm ───────────────────────────────────────────────────────
     # DP AR hidden in pipeline bubble — independent, exact.

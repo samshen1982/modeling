@@ -14,6 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple, Generator
 import pandas as pd
 from tqdm import tqdm
 
+# Unit conventions:
+# - Search filtering uses decimal GB (/1e9) for consistency with max_memory_gb parameter
+# - report_to_dict() uses GiB (1024**3) via MemBreakdown.to_gb()
+# - Difference: 1000 bytes / 1e9 = 1.00 decimal GB, 1000 bytes / 1024**3 = 0.93 GiB (~7%)
+
 from zrt.hardware.registry import load as load_hw
 from zrt.training.io.config_loader import _parse_model, _parse_system, _parse_strategy
 from zrt.training.search.estimator import estimate

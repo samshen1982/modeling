@@ -167,6 +167,8 @@ def report_summary(report: Report) -> str:
             lines.append(f"  Per-microbatch (steady): FWD={report.steady_fwd_per_mb_ms:.2f}ms  BWD={report.steady_bwd_per_mb_ms:.2f}ms  Total={report.steady_per_mb_ms:.2f}ms  ({mb_count} microbatches)")
 
     # ── Memory ──────────────────────────────────────────────────────
+    # Note: to_gb() uses GiB (1024**3), while search surfaces use decimal GB (1e9).
+    # Difference is ~7%. peak_gb is the OOM-relevant metric (max of forward/backward/optimizer phases).
     if report.memory is not None:
         gb = report.memory.to_gb()
         lines.append("")
@@ -177,6 +179,7 @@ def report_summary(report: Report) -> str:
         lines.append(f"    activations: {gb['activations_gb']:.2f} GB")
         lines.append(f"    comm_buf:    {gb['comm_buffers_gb']:.2f} GB")
         lines.append(f"    TOTAL:       {gb['total_gb']:.2f} GB")
+        lines.append(f"    PEAK:        {gb['peak_gb']:.2f} GB  (OOM-relevant)")
 
     # ── Per-stage times ─────────────────────────────────────────────
     if report.per_stage:

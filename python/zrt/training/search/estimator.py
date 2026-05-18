@@ -170,12 +170,16 @@ def grid_search(
 
 
 def pareto_frontier(reports: list[TrainingReport]) -> list[TrainingReport]:
-    """Extract Pareto frontier (step_time_ms, peak_hbm) with deterministic ordering.
+    """Extract Pareto frontier (step_time_ms, total_memory) with deterministic ordering.
 
     A config is on the Pareto frontier if no other config has both:
-      - lower step_time_ms AND lower peak_hbm
+      - lower step_time_ms AND lower total_memory
 
-    Deterministic ordering: sort by (step_time_ms, peak_hbm) to ensure
+    Note: total_memory is the algebraic sum of components (MemBreakdown.total),
+    not peak_overall which is the OOM-relevant metric. The frontier uses total
+    for consistency with the sorting behavior established in the codebase.
+
+    Deterministic ordering: sort by (step_time_ms, total_memory) to ensure
     reproducible frontier construction. When two configs have identical
     step_time and memory, the first one in sorted order is preferred.
 

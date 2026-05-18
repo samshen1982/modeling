@@ -38,10 +38,10 @@ class TestSteadyBwdOverlap:
     def test_ratio_extends_hide_window_in_dualpipe(self):
         """DualPipe cooldown is small; with ratio>0, steady_bwd contributes
         and dp_exposed shrinks."""
-        # Two equal stages, fwd=10, bwd=20 → t_stage_max = 30
+        # Two equal stages, fwd=10, bwd=20 → t_fwd_max=10, t_bwd_max=20, t_stage_max=30
         # pp=2 DualPipe: bubble = (pp-1)/2 * t_stage_max = 15
         #                cooldown = bubble / 2 = 7.5
-        # steady_bwd_total = M * t_stage_max / 2 = 4 * 30 / 2 = 60
+        # steady_bwd_total = M * t_bwd_max = 4 * 20 = 80 (bottom-up: reads actual bwd)
         stages = [StageTime(fwd=10.0, bwd=20.0), StageTime(fwd=10.0, bwd=20.0)]
         s_no = Strategy(tp=1, pp=2, dp=4, micro_batch=1, global_batch=4,
                         pp_schedule=PPSched.DUALPIPE, dp_steady_overlap_ratio=0.0)
@@ -52,9 +52,9 @@ class TestSteadyBwdOverlap:
         r_half = DualPipeComposer().compose(stages, M=4, pp=2, dp_ar_time=100.0, strategy=s_half)
 
         # ratio=0: window = 7.5 → hide = 7.5 → exposed = 92.5
-        # ratio=0.5: window = 7.5 + 0.5*60 = 37.5 → hide = 37.5 → exposed = 62.5
+        # ratio=0.5: window = 7.5 + 0.5*80 = 47.5 → hide = 47.5 → exposed = 52.5
         assert r_no.dp_exposed == pytest.approx(92.5)
-        assert r_half.dp_exposed == pytest.approx(62.5)
+        assert r_half.dp_exposed == pytest.approx(52.5)
 
     def test_ratio_zero_matches_legacy_behavior(self):
         """ratio=0 should reproduce the previous cooldown-only window exactly,

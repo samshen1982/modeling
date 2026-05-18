@@ -320,13 +320,15 @@ class DualPipeComposer(PipelineComposer):
         if pp <= 1:
             return OneF1BComposer().compose(stage_times, M, pp, dp_ar_time, strategy)
 
-        t_stage_max = max(st.fwd + st.bwd for st in stage_times) if stage_times else 0
+        t_fwd_max = max((st.fwd for st in stage_times), default=0.0)
+        t_bwd_max = max((st.bwd for st in stage_times), default=0.0)
+        t_stage_max = t_fwd_max + t_bwd_max
 
         bubble = (pp - 1) / 2.0 * t_stage_max
         warmup = bubble / 2.0
         cooldown = bubble / 2.0
         steady = M * t_stage_max
-        steady_bwd_total = M * t_stage_max / 2
+        steady_bwd_total = M * t_bwd_max
         window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
         hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
         dp_exposed = dp_ar_time - hidden
@@ -346,12 +348,12 @@ class DualPipeComposer(PipelineComposer):
             cooldown_steps=max(1, -(-(pp - 1) // 2)),
             warmup_fwd=warmup,
             warmup_bwd=0.0,
-            steady_fwd=M * t_stage_max / 2,
-            steady_bwd=M * t_stage_max / 2,
+            steady_fwd=M * t_fwd_max,
+            steady_bwd=M * t_bwd_max,
             cooldown_fwd=0.0,
             cooldown_bwd=cooldown,
-            steady_fwd_per_mb=t_stage_max / 2,
-            steady_bwd_per_mb=t_stage_max / 2,
+            steady_fwd_per_mb=t_fwd_max,
+            steady_bwd_per_mb=t_bwd_max,
             steady_per_mb=t_stage_max,
         )
 
@@ -377,13 +379,15 @@ class DualPipeVComposer(PipelineComposer):
         if pp <= 1:
             return OneF1BComposer().compose(stage_times, M, pp, dp_ar_time, strategy)
 
-        t_stage_max = max(st.fwd + st.bwd for st in stage_times) if stage_times else 0
+        t_fwd_max = max((st.fwd for st in stage_times), default=0.0)
+        t_bwd_max = max((st.bwd for st in stage_times), default=0.0)
+        t_stage_max = t_fwd_max + t_bwd_max
 
         bubble = (pp - 1) / (2.0 * V) * t_stage_max
         warmup = bubble / 2.0
         cooldown = bubble / 2.0
         steady = M * t_stage_max
-        steady_bwd_total = M * t_stage_max / 2
+        steady_bwd_total = M * t_bwd_max
         window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
         hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
         dp_exposed = dp_ar_time - hidden
@@ -403,12 +407,12 @@ class DualPipeVComposer(PipelineComposer):
             cooldown_steps=max(1, -(-(pp - 1) // (2 * V))),
             warmup_fwd=warmup,
             warmup_bwd=0.0,
-            steady_fwd=M * t_stage_max / 2,
-            steady_bwd=M * t_stage_max / 2,
+            steady_fwd=M * t_fwd_max,
+            steady_bwd=M * t_bwd_max,
             cooldown_fwd=0.0,
             cooldown_bwd=cooldown,
-            steady_fwd_per_mb=t_stage_max / 2,
-            steady_bwd_per_mb=t_stage_max / 2,
+            steady_fwd_per_mb=t_fwd_max,
+            steady_bwd_per_mb=t_bwd_max,
             steady_per_mb=t_stage_max,
         )
 
@@ -439,6 +443,8 @@ class ZeroBubbleComposer(PipelineComposer):
 
         bottleneck = max(stage_times, key=lambda st: st.fwd + st.bwd) if stage_times else StageTime()
         t_stage = bottleneck.fwd + bottleneck.bwd
+        t_fwd = bottleneck.fwd
+        t_bwd = bottleneck.bwd
         t_w = bottleneck.bwd_dw
 
         # ZB-1P/ZB-V keep a residual per-transition bubble even when t_w ≈ t_stage.
@@ -453,7 +459,7 @@ class ZeroBubbleComposer(PipelineComposer):
         steady = M * t_stage
         cooldown = bubble / 2.0
 
-        steady_bwd_total = M * (t_stage / 2)
+        steady_bwd_total = M * t_bwd
         window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
         hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
         dp_exposed = dp_ar_time - hidden
@@ -473,12 +479,12 @@ class ZeroBubbleComposer(PipelineComposer):
             cooldown_steps=pp - 1,
             warmup_fwd=warmup,
             warmup_bwd=0.0,
-            steady_fwd=M * t_stage / 2,
-            steady_bwd=M * t_stage / 2,
+            steady_fwd=M * t_fwd,
+            steady_bwd=M * t_bwd,
             cooldown_fwd=0.0,
             cooldown_bwd=cooldown,
-            steady_fwd_per_mb=t_stage / 2,
-            steady_bwd_per_mb=t_stage / 2,
+            steady_fwd_per_mb=t_fwd,
+            steady_bwd_per_mb=t_bwd,
             steady_per_mb=t_stage,
         )
 

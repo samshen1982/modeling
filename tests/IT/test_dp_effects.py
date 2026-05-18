@@ -142,12 +142,19 @@ def test_dp_communication_zero_for_dp1(dp_reports):
 
 
 def test_dp_communication_nonzero_for_dp4(dp_reports):
-    """dp_hidden_ms and dp_exposed_ms should be >0 for dp=4 (DP AR/RS communication exists)."""
+    """dp_hidden + dp_exposed should be >0 for dp=4 (DP AR/RS communication exists).
+
+    dp_hidden may be 0 (e.g. no bubble to absorb AR) or dp_exposed may be 0
+    (e.g. AR fully hidden in bubble), but their sum must reflect the total
+    DP communication volume.
+    """
     _, rep4 = dp_reports
 
     dp_hidden4 = rep4.get("dp_hidden_ms")
     dp_exposed4 = rep4.get("dp_exposed_ms")
     assert dp_hidden4 is not None
     assert dp_exposed4 is not None
-    assert dp_hidden4 > 0, f"dp_hidden should be >0 for dp=4, got {dp_hidden4}"
-    assert dp_exposed4 > 0, f"dp_exposed should be >0 for dp=4, got {dp_exposed4}"
+    assert (dp_hidden4 + dp_exposed4) > 0, (
+        f"dp_hidden + dp_exposed should be >0 for dp=4, "
+        f"got hidden={dp_hidden4}, exposed={dp_exposed4}"
+    )

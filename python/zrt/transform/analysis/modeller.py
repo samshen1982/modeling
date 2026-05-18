@@ -199,8 +199,8 @@ def estimate_training_from_graphs(
     exposed_comm_ms = pipeline_metrics.exposed_comm_ms if pipeline_metrics else 0.0
     hidden_comm_ms = pipeline_metrics.hidden_comm_ms if pipeline_metrics else 0.0
     total_comm_ms = pipeline_metrics.total_comm_ms if pipeline_metrics else 0.0
-    dp_exposed_from_metrics = pipeline_metrics.dp_exposed_ms if pipeline_metrics else 0.0
-    dp_hidden_from_metrics = pipeline_metrics.dp_hidden_ms if pipeline_metrics else 0.0
+    dp_exposed_from_metrics = pipeline_metrics.dp_exposed_ms if pipeline_metrics else None
+    dp_hidden_from_metrics = pipeline_metrics.dp_hidden_ms if pipeline_metrics else None
 
     parallel = ctx.parallel
     training = ctx.training
@@ -419,7 +419,7 @@ def estimate_training_from_graphs(
         warmup_ms=warmup_ms,
         steady_ms=steady_ms,
         cooldown_ms=cooldown_ms,
-        dp_exposed_ms=dp_exposed_from_metrics if dp_exposed_from_metrics > 0 else dp_exposed_ms,
+        dp_exposed_ms=dp_exposed_from_metrics if dp_exposed_from_metrics is not None else dp_exposed_ms,
         optimizer_time_ms=optimizer_time_ms,
         optimizer_comm_ms=optimizer_comm_ms,
 
@@ -448,7 +448,7 @@ def estimate_training_from_graphs(
         pp_exposed_ms=pp_exposed_ms,
 
         # Hidden comm
-        dp_hidden_ms=dp_hidden_from_metrics if dp_hidden_from_metrics > 0 else max(0.0, hidden_comm_ms - (tp_hidden_ms if 'tp_hidden_ms' in locals() else 0.0)),
+        dp_hidden_ms=dp_hidden_from_metrics if dp_hidden_from_metrics is not None else max(0.0, hidden_comm_ms - (tp_hidden_ms if 'tp_hidden_ms' in locals() else 0.0)),
         tp_hidden_ms=0.0,
 
         # Config / model

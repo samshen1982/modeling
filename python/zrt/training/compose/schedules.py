@@ -760,16 +760,26 @@ def pipeline_step_time(
     ag_time = opt_comm_parts.get("muon_ag", 0.0)
     rs_time = opt_comm_parts.get("muon_rs", 0.0)
 
-    # Moonshot rotation: AG is chunk-pipelined with NS compute, so the
-    # AG portion overlapped under NS is off the critical path. RS still
-    # sits between optimizer step and the next iteration's forward — keep
-    # it exposed here (next-iteration warmup overlap is not yet modeled).
+    # Moonshot rotation hides two parts:
+    #   1. AG (param gather, before NS) is chunk-pipelined with NS compute;
+    #      total = max(AG, NS) ⇒ hidden_AG = min(AG, opt_time).
+    #   2. RS (updated-param scatter, after NS) overlaps with the NEXT
+    #      iteration's first microbatch(es) of forward — steady-state
+    #      assumption, matches Megatron-Core distributed-optimizer behavior.
+    #      Hide window: warmup_fwd for pp>1; one microbatch fwd for pp=1.
     rotation_active = (
         strategy.optimizer.value == "muon"
         and strategy.muon_config is not None
         and strategy.muon_config.rotation
     )
-    opt_comm_hidden = min(ag_time, opt_time) if rotation_active else 0.0
+    if rotation_active:
+        ag_hidden = min(ag_time, opt_time)
+        rs_hide_window = max(step.warmup_fwd, step.steady_fwd_per_mb)
+        rs_hidden = min(rs_time, rs_hide_window)
+    else:
+        ag_hidden = 0.0
+        rs_hidden = 0.0
+    opt_comm_hidden = ag_hidden + rs_hidden
     opt_comm_exposed = (ag_time + rs_time) - opt_comm_hidden
 
     step.optimizer_time = opt_time

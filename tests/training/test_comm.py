@@ -37,7 +37,11 @@ def test_p2p_time():
 
 
 def test_ag_time():
-    """AG with all_to_all topology: single-step (alpha + S/N * beta)."""
+    """AG full-mesh (NCCL bus-bw convention): alpha + S·(N-1)/N · beta.
+
+    The previous form `alpha + (S/N)·beta` dropped the (N-1) factor on the
+    bandwidth term, under-counting intra-node AG/RS/AR/A2A by ~N×.
+    """
     link = _intra_link()
     N = 8
     S = 100 * 1024 * 1024  # 100 MB
@@ -46,8 +50,7 @@ def test_ag_time():
 
     alpha = 1e-6
     beta = 1.0 / (900e9 / 8)
-    # nvswitch uses single-step formula
-    expected = alpha + (S / N) * beta
+    expected = alpha + S * (N - 1) / N * beta
     assert t == pytest.approx(expected, rel=0.01)
 
 
@@ -66,7 +69,7 @@ def test_ar_time_is_2x_ag():
 
 
 def test_a2a_time():
-    """A2A on NVSwitch (full_connectivity): single-step (alpha + S/N * beta)."""
+    """A2A full-mesh: alpha + S·(N-1)/N · beta (NCCL bus-bw)."""
     link = _intra_link()
     N = 4
     S = 20 * 1024 * 1024
@@ -75,8 +78,7 @@ def test_a2a_time():
 
     alpha = 1e-6
     beta = 1.0 / (900e9 / 8)
-    # full_connectivity topology uses single-step A2A
-    expected = alpha + (S / N) * beta
+    expected = alpha + S * (N - 1) / N * beta
     assert t == pytest.approx(expected, rel=0.01)
 
 
@@ -174,6 +176,36 @@ def test_a2a_large_n_uses_log2_latency():
     )
     # Sanity: still > pure bandwidth
     assert t > bandwidth, "should have non-zero latency"
+
+
+def test_hierarchical_ag_beats_flat_for_multi_node():
+    """For a DP group that spans nodes, 2-level hierarchical AG should be
+    faster than (or equal to) a flat inter-node ring — latency is paid
+    only L=N/D times instead of N-1.
+    """
+    from zrt.training.models.comm import collective_time_hierarchical
+    system = _make_system()  # 4 nodes × 8 gpus/node, inter=IB fat_tree
+    N = 32  # multi-node group
+    S = 100 * 1024 * 1024
+    c = Collective("test_hier", "AG", "DP", S, "op1")
+    t_hier = collective_time_hierarchical(c, N, system)
+    t_flat = collective_time(c, N, system.interconnect.inter_node)
+    assert t_hier <= t_flat, (
+        f"hierarchical AG ({t_hier*1e6:.1f}µs) should be ≤ flat "
+        f"inter-node ({t_flat*1e6:.1f}µs) for multi-node groups"
+    )
+
+
+def test_hierarchical_ag_falls_back_to_intra_within_node():
+    """Group fitting in one node: hierarchical should match flat intra-node."""
+    from zrt.training.models.comm import collective_time_hierarchical
+    system = _make_system()
+    N = 8  # fits in one node
+    S = 100 * 1024 * 1024
+    c = Collective("test_hier", "AG", "TP", S, "op1")
+    t_hier = collective_time_hierarchical(c, N, system)
+    t_intra = collective_time(c, N, system.interconnect.intra_node)
+    assert t_hier == pytest.approx(t_intra, rel=1e-9)
 
 
 def test_a2a_small_n_keeps_legacy_formula():

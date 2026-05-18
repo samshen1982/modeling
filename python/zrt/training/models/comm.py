@@ -17,18 +17,23 @@ from zrt.training.spec.system import SystemSpec
 def collective_time(c: Collective, group_size: int, link: LinkSpec) -> float:
     """Return time in seconds for one collective operation.
 
-    Uses the alpha-beta model:
-      alpha = per-link latency (seconds)
-      beta = per-byte transfer time (seconds/byte) = 1 / (bw_bytes_per_sec)
-
-    For P2P with multiple rounds (Ring CP), the total time is:
-      rounds × (alpha + S × beta)
+    Alpha-beta model with NCCL bus-bandwidth convention:
+      alpha = per-link latency (s); beta = 1 / bw_bytes_per_sec
+      S = total post-collective bytes per rank (AG output, RS input)
+      Bandwidth term for AG/RS = S × (N-1)/N × beta   (bus-bw form)
 
     Topology-aware algorithm selection:
-      - "all_to_all" / "nvswitch" / "full_mesh": single-step gather/scatter
-      - "ring" / "fat_tree" / default: ring allreduce ((N-1)*(α + S/N*β))
+      full_connectivity ("all_to_all"/"nvswitch"/"full_mesh"): single-step
+        AG/RS:  α + S·(N-1)/N · β
+        AR:     2α + 2·S·(N-1)/N · β
+        A2A:    α + S·(N-1)/N · β
+      ring/fat_tree (default):
+        AG/RS:  (N-1)·α + S·(N-1)/N · β
+        AR:     2(N-1)·α + 2·S·(N-1)/N · β
+        A2A (N>16, Bruck): ⌈log2 N⌉·α + S·(N-1)/N · β
+        A2A (N≤16, pairwise): (N-1)·α + S·(N-1)/N · β
 
-    Note: When P2P overlaps with compute, only exposed portion counts.
+    P2P: rounds × (α + S·β).
     """
     alpha = link.latency_us * 1e-6
     bw_bytes = link.bandwidth_gbps * 1e9 / 8
@@ -38,33 +43,79 @@ def collective_time(c: Collective, group_size: int, link: LinkSpec) -> float:
     S = c.bytes_
     rounds = c.rounds
 
+    if N <= 1 or S <= 0:
+        return 0.0
+
     full_connectivity = link.topology in ("all_to_all", "nvswitch", "full_mesh")
+    bw_term = S * (N - 1) / N * beta  # NCCL bus-bw factor
 
     if c.kind in ("AG", "RS"):
-        if full_connectivity:
-            return alpha + (S / N) * beta
-        return (N - 1) * (alpha + (S / N) * beta)
+        latency = alpha if full_connectivity else (N - 1) * alpha
+        return latency + bw_term
 
     if c.kind == "AR":
-        if full_connectivity:
-            return 2 * (alpha + (S / N) * beta)
-        return 2 * (N - 1) * (alpha + (S / N) * beta)
+        latency = 2 * alpha if full_connectivity else 2 * (N - 1) * alpha
+        return latency + 2 * bw_term
 
     if c.kind == "A2A":
         if full_connectivity:
-            # NVSwitch-class: single-step A2A
-            return alpha + (S / N) * beta
+            return alpha + bw_term
         # NCCL/HCCL use Bruck (log2 rounds) above ~16 ranks; below that,
-        # pairwise-exchange is competitive and matches the legacy formula.
+        # pairwise-exchange is competitive.
         if N > 16:
-            rounds = max(1, math.ceil(math.log2(N)))
-            return rounds * alpha + ((N - 1) / N) * S * beta
-        return (N - 1) * (alpha + (S / N) * beta)
+            return max(1, math.ceil(math.log2(N))) * alpha + bw_term
+        return (N - 1) * alpha + bw_term
 
     if c.kind == "P2P":
         return rounds * (alpha + S * beta)
 
     return 0.0
+
+
+def collective_time_hierarchical(
+    c: Collective, group_size: int, system: SystemSpec,
+) -> float:
+    """AG/RS/AR over a (possibly multi-node) group using 2-level hierarchy.
+
+    Megatron-Core / NCCL pattern when the group spans nodes:
+      Stage 1 (intra-node, D ranks): each rank gathers/reduces its
+        node's D shards over NVLink/NVSwitch.
+      Stage 2 (inter-node, L = N/D nodes): node-leaders gather/reduce
+        across nodes over IB.
+
+    Falls back to flat ``collective_time`` for kinds we don't decompose
+    (P2P / A2A — A2A hierarchy is non-trivial and not modeled here) or
+    when the group fits in one node, or when N is not D-aligned.
+    """
+    intra = system.interconnect.intra_node
+    inter = system.interconnect.inter_node
+    D = intra.num_devices if intra.num_devices > 0 else system.gpus_per_node
+    N = group_size
+    S = c.bytes_
+
+    if N <= D:
+        return collective_time(c, N, intra)
+    if N % D != 0 or c.kind not in ("AG", "RS", "AR"):
+        return collective_time(c, N, inter)
+
+    L = N // D
+
+    if c.kind in ("AG", "RS"):
+        # Stage 1: intra AG/RS of D ranks, output bytes per rank = S/L.
+        # Stage 2: inter AG/RS of L nodes, output bytes per rank = S.
+        intra_c = Collective(name=c.name + "_intra", kind=c.kind,
+                             group=c.group, bytes_=S // L)
+        inter_c = Collective(name=c.name + "_inter", kind=c.kind,
+                             group=c.group, bytes_=S)
+        return collective_time(intra_c, D, intra) + collective_time(inter_c, L, inter)
+
+    # AR decomposes into RS + AG, each hierarchical.
+    rs_c = Collective(name=c.name + "_rs", kind="RS", group=c.group, bytes_=S)
+    ag_c = Collective(name=c.name + "_ag", kind="AG", group=c.group, bytes_=S)
+    return (
+        collective_time_hierarchical(rs_c, N, system)
+        + collective_time_hierarchical(ag_c, N, system)
+    )
 
 
 def tier_for_group(
@@ -115,9 +166,7 @@ def total_comm_time(
             name="dp_grad_reduce", kind="AR" if strategy.zero_stage == 0 else "RS",
             group="DP", bytes_=grad_bytes, inserted_after="optimizer_step",
         )
-        group_size = strategy.dp
-        link = tier_for_group("DP", group_size, system)
-        result[dp_c.name] = collective_time(dp_c, group_size, link)
+        result[dp_c.name] = collective_time_hierarchical(dp_c, strategy.dp, system)
 
     # Muon optimizer ZeRO-1 AllGather/ReduceScatter
     if strategy.optimizer.value == "muon" and strategy.dp > 1 and strategy.zero_stage >= 1:
@@ -183,17 +232,16 @@ def optimizer_comm_time(
     def _ag_rs(bytes_, group_size: int) -> tuple[float, float]:
         if group_size <= 1 or bytes_ <= 0:
             return 0.0, 0.0
-        link = tier_for_group("DP", group_size, system)
-        ag = collective_time(
+        ag = collective_time_hierarchical(
             Collective(name="muon_ag", kind="AG", group="DP",
                        bytes_=bytes_, inserted_after="backward_end"),
-            group_size, link,
+            group_size, system,
         )
         if rotation:
-            rs = collective_time(
+            rs = collective_time_hierarchical(
                 Collective(name="muon_rs", kind="RS", group="DP",
                            bytes_=bytes_, inserted_after="optimizer_step"),
-                group_size, link,
+                group_size, system,
             )
         else:
             rs = 0.0

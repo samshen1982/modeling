@@ -190,8 +190,13 @@ class TestLastBucketResidual:
         assert total_dp > 0.0
         assert r.dp_exposed > 0.0, \
             f"DP fully hidden (bug): exposed={r.dp_exposed}, total={total_dp}"
-        # Residual is one bucket's worth: exposed ≈ total / buckets.
-        assert r.dp_exposed == pytest.approx(total_dp / 25, rel=1e-6)
+        # Bucket-residual is a *floor* on exposed: at least 1/n of total DP
+        # comm always escapes the hide window. Exact equality only when the
+        # window dominates over max_hidable; otherwise window is binding and
+        # exposed = dp_ar_time - window (≥ total/n).
+        assert r.dp_exposed >= total_dp / 25 * (1 - 1e-6), (
+            f"exposed={r.dp_exposed} below bucket floor total/25={total_dp/25}"
+        )
 
     def test_more_buckets_smaller_residual(self):
         stages = [StageTime(fwd=1.0, bwd=2.0)]

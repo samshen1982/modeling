@@ -127,16 +127,17 @@ class TestHideWindowConsistency:
         assert r0.dp_exposed > r.dp_exposed, \
             f"{sched}: ratio=0 should expose more DP than ratio=0.5"
 
-    def test_onef1b_pp1_consistent_with_helper(self):
-        """The OneF1B pp=1 special case used st.bwd*M directly. After the
-        refactor, the same number should fall out of the unified helper when
-        cooldown=0 and ratio=1.0."""
+    def test_onef1b_pp1_keeps_last_bucket_residual(self):
+        """pp=1: even when the steady-bwd hide window dwarfs dp_ar_time, the
+        last gradient bucket cannot overlap, so a residual of
+        dp_ar_time / dp_grad_buckets stays exposed (never exactly 0)."""
         stages = [StageTime(fwd=1.0, bwd=2.0)]
         s = Strategy(tp=1, pp=1, dp=4, micro_batch=1, global_batch=4,
-                     dp_steady_overlap_ratio=1.0)
-        # Pre-refactor: pp=1 uses bwd*M = 2*4 = 8; with dp_ar_time=3 → fully hidden.
+                     dp_steady_overlap_ratio=1.0, dp_grad_buckets=25)
+        # window = bwd*M = 8 >> dp_ar_time; max_hidable = 3*(1-1/25) = 2.88
         r = OneF1BComposer().compose(stages, M=4, pp=1, dp_ar_time=3.0, strategy=s)
-        assert r.dp_exposed == pytest.approx(0.0)
+        assert r.dp_exposed == pytest.approx(3.0 / 25)
+        assert r.dp_exposed > 0.0
 
     def test_dualbatch_uses_same_helper(self):
         """After fix #3, dualbatch's new_dp_exposed should go through the same
@@ -153,6 +154,56 @@ class TestHideWindowConsistency:
         # With ratio=1.0 and steady_bwd >> dp_total, DP should be ~fully hidden.
         assert result.dp_hidden > 0.5 * (result.dp_exposed + result.dp_hidden), \
             f"dualbatch+ratio=1.0 should hide most DP; got exposed={result.dp_exposed}, hidden={result.dp_hidden}"
+
+
+class TestLastBucketResidual:
+    """Regression for the dp_exposed≈0 bug: gradient bucketing leaves the last
+    bucket's collective non-overlappable, so dp_exposed must stay > 0 whenever
+    dp>1, regardless of how large the hide window is."""
+
+    def _model(self):
+        return ModelSpec(hidden=2048, ffn=8192, num_heads=16, num_kv_heads=16,
+                         head_dim=128, vocab=32000, seq_len=1024,
+                         layers=[LayerKind.DENSE] * 4)
+
+    @pytest.mark.parametrize("pp,sched", [
+        (1, PPSched.ONE_F_ONE_B),
+        (2, PPSched.ONE_F_ONE_B),
+        (2, PPSched.DUALPIPE),
+    ])
+    def test_dp_exposed_strictly_positive(self, pp, sched):
+        model = self._model()
+        s = Strategy(tp=1, pp=pp, dp=8, micro_batch=1, global_batch=32,
+                     zero_stage=1, pp_schedule=sched,
+                     dp_overlap_in_bubble=True, dp_steady_overlap_ratio=0.5,
+                     dp_grad_buckets=25)
+        r = pipeline_step_time(build_graph(model, s), model, _make_system(), s)
+        total_dp = r.dp_exposed + r.dp_hidden
+        assert total_dp > 0.0
+        assert r.dp_exposed > 0.0, \
+            f"DP fully hidden (bug): exposed={r.dp_exposed}, total={total_dp}"
+        # Residual is one bucket's worth: exposed ≈ total / buckets.
+        assert r.dp_exposed == pytest.approx(total_dp / 25, rel=1e-6)
+
+    def test_more_buckets_smaller_residual(self):
+        stages = [StageTime(fwd=1.0, bwd=2.0)]
+        s_few = Strategy(tp=1, pp=1, dp=4, micro_batch=1, global_batch=4,
+                         dp_steady_overlap_ratio=1.0, dp_grad_buckets=4)
+        s_many = Strategy(tp=1, pp=1, dp=4, micro_batch=1, global_batch=4,
+                          dp_steady_overlap_ratio=1.0, dp_grad_buckets=100)
+        r_few = OneF1BComposer().compose(stages, M=4, pp=1, dp_ar_time=3.0, strategy=s_few)
+        r_many = OneF1BComposer().compose(stages, M=4, pp=1, dp_ar_time=3.0, strategy=s_many)
+        assert r_few.dp_exposed == pytest.approx(3.0 / 4)
+        assert r_many.dp_exposed == pytest.approx(3.0 / 100)
+        assert r_many.dp_exposed < r_few.dp_exposed
+
+    def test_overlap_disabled_still_fully_exposed(self):
+        """dp_overlap_in_bubble=False is unchanged: DP fully exposed."""
+        stages = [StageTime(fwd=1.0, bwd=2.0)]
+        s = Strategy(tp=1, pp=1, dp=4, micro_batch=1, global_batch=4,
+                     dp_overlap_in_bubble=False, dp_grad_buckets=25)
+        r = OneF1BComposer().compose(stages, M=4, pp=1, dp_ar_time=3.0, strategy=s)
+        assert r.dp_exposed == pytest.approx(3.0)
 
 
 class TestZeroBubbleFloor:

@@ -119,13 +119,39 @@ def _dp_hide_window(
       - Else return cooldown + ratio · steady_bwd_total, with ratio drawn from
         strategy.dp_steady_overlap_ratio (default 0.5).
 
-    The caller is responsible for clamping with dp_ar_time:
-        hide = min(_dp_hide_window(...), dp_ar_time)
+    Callers go through _dp_hidden(), which clamps this window against
+    dp_ar_time minus a non-overlappable last-bucket residual.
     """
     if not strategy.dp_overlap_in_bubble:
         return 0.0
     ratio = max(0.0, min(1.0, strategy.dp_steady_overlap_ratio))
     return cooldown + ratio * steady_bwd_total
+
+
+def _dp_hidden(
+    dp_ar_time: float,
+    cooldown: float,
+    steady_bwd_total: float,
+    strategy: Strategy,
+) -> float:
+    """Hidden portion of DP grad-reduce time (seconds).
+
+    DDP/ZeRO overlaps gradient reduction with backward via bucketing, but the
+    last bucket's collective cannot start until the final gradient is produced.
+    A residual of ~dp_ar_time / dp_grad_buckets is therefore always exposed,
+    even when the hide window (_dp_hide_window) is effectively unbounded —
+    which previously forced dp_exposed to exactly 0 for any realistic
+    compute/comm ratio.
+
+    Returns the amount of dp_ar_time that is hidden; the caller computes
+    dp_exposed = dp_ar_time - hidden.
+    """
+    if dp_ar_time <= 0:
+        return 0.0
+    window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
+    n = max(1, strategy.dp_grad_buckets)
+    max_hidable = dp_ar_time * (1.0 - 1.0 / n)
+    return min(window, max_hidable)
 
 
 class PipelineComposer(ABC):
@@ -165,8 +191,7 @@ class OneF1BComposer(PipelineComposer):
             st = stage_times[0] if stage_times else StageTime()
             step = st.fwd + st.bwd
             steady_bwd_total = st.bwd * M
-            window = _dp_hide_window(0.0, steady_bwd_total, strategy)
-            hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
+            hidden = _dp_hidden(dp_ar_time, 0.0, steady_bwd_total, strategy)
             dp_exposed = dp_ar_time - hidden
 
             ideal_step = M * (st.fwd + st.bwd)
@@ -205,8 +230,7 @@ class OneF1BComposer(PipelineComposer):
         # DP AR: hide in cooldown (backward drain phase) if enabled
         bubble = warmup + cooldown
         steady_bwd_total = M * t_bwd_max
-        window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
-        hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
+        hidden = _dp_hidden(dp_ar_time, cooldown, steady_bwd_total, strategy)
         dp_exposed = dp_ar_time - hidden
 
         step = warmup + steady + cooldown + dp_exposed
@@ -269,8 +293,7 @@ class Interleaved1F1BComposer(PipelineComposer):
 
         bubble = warmup + cooldown
         steady_bwd_total = M * t_bwd_max
-        window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
-        hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
+        hidden = _dp_hidden(dp_ar_time, cooldown, steady_bwd_total, strategy)
         dp_exposed = dp_ar_time - hidden
 
         step = warmup + steady + cooldown + dp_exposed
@@ -327,8 +350,7 @@ class DualPipeComposer(PipelineComposer):
         cooldown = bubble / 2.0
         steady = M * t_stage_max
         steady_bwd_total = M * t_stage_max / 2
-        window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
-        hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
+        hidden = _dp_hidden(dp_ar_time, cooldown, steady_bwd_total, strategy)
         dp_exposed = dp_ar_time - hidden
 
         step = warmup + steady + cooldown + dp_exposed
@@ -384,8 +406,7 @@ class DualPipeVComposer(PipelineComposer):
         cooldown = bubble / 2.0
         steady = M * t_stage_max
         steady_bwd_total = M * t_stage_max / 2
-        window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
-        hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
+        hidden = _dp_hidden(dp_ar_time, cooldown, steady_bwd_total, strategy)
         dp_exposed = dp_ar_time - hidden
 
         step = warmup + steady + cooldown + dp_exposed
@@ -454,8 +475,7 @@ class ZeroBubbleComposer(PipelineComposer):
         cooldown = bubble / 2.0
 
         steady_bwd_total = M * (t_stage / 2)
-        window = _dp_hide_window(cooldown, steady_bwd_total, strategy)
-        hidden = min(window, dp_ar_time) if dp_ar_time > 0 else 0.0
+        hidden = _dp_hidden(dp_ar_time, cooldown, steady_bwd_total, strategy)
         dp_exposed = dp_ar_time - hidden
 
         step = warmup + steady + cooldown + dp_exposed
@@ -575,9 +595,9 @@ def pipeline_step_time(
         # Recompute DP exposure through the same helper used by composers,
         # so steady-BWD overlap is still available when dualbatch zeros the cooldown.
         steady_bwd_total_bot = max(0.0, step.steady_bwd_per_mb * M)
-        window = _dp_hide_window(new_cooldown, steady_bwd_total_bot, strategy)
         if dp_ar_time > 0:
-            new_dp_exposed = dp_ar_time - min(window, dp_ar_time)
+            new_dp_exposed = dp_ar_time - _dp_hidden(
+                dp_ar_time, new_cooldown, steady_bwd_total_bot, strategy)
         else:
             new_dp_exposed = step.dp_exposed
         dp_delta = new_dp_exposed - step.dp_exposed

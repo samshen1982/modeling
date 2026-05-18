@@ -292,6 +292,7 @@ def _parse_strategy(d: dict) -> Strategy:
         dualbatch=d.get("dualbatch", False),
         dp_overlap_in_bubble=d.get("dp_overlap_in_bubble", True),
         dp_steady_overlap_ratio=float(d.get("dp_steady_overlap_ratio", 0.5)),
+        dp_grad_buckets=int(d.get("dp_grad_buckets", 25)),
         optimizer=OptKind(d.get("optimizer", "adam")),
         muon_config=muon_config,
     )

@@ -122,6 +122,7 @@ def _make_strategy_from_config(config: Dict) -> Strategy:
         cp_kind=CPKind(config.get("cp_kind", "none")),
         dualbatch=config.get("dualbatch", False),
         dp_overlap_in_bubble=config.get("dp_overlap_in_bubble", True),
+        dp_grad_buckets=config.get("dp_grad_buckets", 25),
     )
 
 
@@ -179,6 +180,7 @@ class TrainingConfigManager:
             cp_kind=CPKind(other_config.get("cp_kind", "none")),
             dualbatch=other_config.get("dualbatch", False),
             dp_overlap_in_bubble=other_config.get("dp_overlap_in_bubble", True),
+            dp_grad_buckets=other_config.get("dp_grad_buckets", 25),
         )
 
     def _expand_auto_values_optimized(self, grid: Dict[str, List[Any]], world_size: int) -> None:

@@ -9,6 +9,7 @@ from zrt.training.search.training_search_util import (
     _make_strategy_from_config,
     _make_system_from_config,
     format_results,
+    run_training_task_wrapper,
 )
 from zrt.training.spec.report import TrainingReport
 from zrt.training.spec.strategy import (
@@ -64,6 +65,45 @@ class TestMakeSystemFromConfig:
         assert system.gpus_per_node == 8
         assert system.world_size == 64
         assert system.host_mem_gb == 2048.0
+
+    def test_search_world_size_uses_active_ranks_with_partial_pod(self):
+        system = _make_system_from_config({
+            "hw": "nvidia_h100_sxm",
+            "world_size": 8192,
+            "gpus_per_node": 72,
+        })
+
+        assert system.nodes == 114
+        assert system.gpus_per_node == 72
+        assert system.world_size == 8192
+        assert system.allocated_gpus == 8208
+        assert system.idle_gpus == 16
+
+    def test_search_world_size_ceil_nodes_for_144_gpu_pod(self):
+        system = _make_system_from_config({
+            "hw": "nvidia_h100_sxm",
+            "world_size": 8192,
+            "gpus_per_node": 144,
+        })
+
+        assert system.nodes == 57
+        assert system.gpus_per_node == 144
+        assert system.world_size == 8192
+        assert system.allocated_gpus == 8208
+        assert system.idle_gpus == 16
+
+    def test_search_world_size_preserves_exact_pod_allocation(self):
+        system = _make_system_from_config({
+            "hw": "nvidia_h100_sxm",
+            "world_size": 128,
+            "gpus_per_node": 8,
+        })
+
+        assert system.nodes == 16
+        assert system.gpus_per_node == 8
+        assert system.world_size == 128
+        assert system.allocated_gpus == 128
+        assert system.idle_gpus == 0
 
 
 class TestMakeStrategyFromConfig:
@@ -217,6 +257,88 @@ class TestTrainingConfigManager:
             ws = cfg["world_size"]
             product = cfg["tp"] * cfg["cp"] * cfg["pp"] * cfg["dp"]
             assert ws == product, f"world_size={ws} != tp*cp*pp*dp={product}"
+
+    def test_pod_packing_filters_tp_cp_that_do_not_fit_72_gpu_pod(self):
+        manager = TrainingConfigManager(
+            param_grid={
+                "model": ["deepseek_v3_2"],
+                "hw": ["nvidia_h100_sxm"],
+                "world_size": [8192],
+                "gpus_per_node": [72],
+                "seq_len": [8192],
+                "tp": [8, 16],
+                "cp": [1],
+                "pp": [16],
+                "ep": [1],
+                "dp": [64, 32],
+                "micro_batch": [1],
+                "global_batch": [8192],
+                "zero_stage": [1],
+                "pp_schedule": ["1f1b"],
+                "recompute": ["none"],
+                "optimizer": ["adam"],
+            }
+        )
+
+        configs = manager.generate_static_configs()
+        combos = {(c["tp"], c["cp"], c["pp"], c["dp"]) for c in configs}
+
+        assert (8, 1, 16, 64) in combos
+        assert (16, 1, 16, 32) not in combos
+        assert all(c["tp"] * c["cp"] * c["pp"] * c["dp"] == 8192 for c in configs)
+
+    def test_pod_packing_allows_tp_cp_16_for_144_gpu_pod(self):
+        manager = TrainingConfigManager(
+            param_grid={
+                "model": ["deepseek_v3_2"],
+                "hw": ["nvidia_h100_sxm"],
+                "world_size": [8192],
+                "gpus_per_node": [144],
+                "seq_len": [8192],
+                "tp": [16],
+                "cp": [1],
+                "pp": [16],
+                "ep": [1],
+                "dp": [32],
+                "micro_batch": [1],
+                "global_batch": [8192],
+                "zero_stage": [1],
+                "pp_schedule": ["1f1b"],
+                "recompute": ["none"],
+                "optimizer": ["adam"],
+            }
+        )
+
+        configs = manager.generate_static_configs()
+
+        assert [(c["tp"], c["cp"], c["pp"], c["dp"]) for c in configs] == [
+            (16, 1, 16, 32)
+        ]
+
+    def test_worker_uses_search_world_size_not_floor_pod_allocation(self):
+        result = run_training_task_wrapper({
+            "model": "deepseek_v3_2",
+            "hw": "nvidia_h100_sxm",
+            "world_size": 8192,
+            "gpus_per_node": 72,
+            "seq_len": 8192,
+            "tp": 8,
+            "cp": 1,
+            "pp": 16,
+            "ep": 1,
+            "dp": 64,
+            "micro_batch": 1,
+            "global_batch": 8192,
+            "zero_stage": 1,
+            "pp_schedule": "1f1b",
+            "recompute": "none",
+            "optimizer": "adam",
+        })
+
+        assert result["status"] == "success"
+        assert result["report"].config_summary["parallelism"].startswith(
+            "TP*CP*PP*DP = 8192"
+        )
 
     def test_output_path_generation(self):
         manager = TrainingConfigManager(

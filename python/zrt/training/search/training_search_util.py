@@ -3,6 +3,7 @@ from __future__ import annotations
 import concurrent.futures
 import itertools
 import logging
+import math
 import multiprocessing
 import os
 import time
@@ -42,6 +43,65 @@ _WORKER_MODEL_CACHE: Dict[Tuple[str, Optional[str]], ModelSpec] = {}
 _WORKER_HW_CACHE: Dict[str, SystemSpec] = {}
 
 _MODELS_DIR = Path(__file__).parent.parent / "configs" / "models"
+_DEFAULT_POD_PACKING_AXES = ("tp", "cp")
+
+
+def _ceil_nodes_for_world_size(world_size: int, gpus_per_node: int) -> int:
+    if gpus_per_node <= 0:
+        raise ValueError("gpus_per_node must be positive")
+    return max(1, math.ceil(world_size / gpus_per_node))
+
+
+def _normalize_pod_packing_axes(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return _DEFAULT_POD_PACKING_AXES
+    if isinstance(value, str):
+        parts = [p.strip().lower() for p in value.split(",")]
+    else:
+        parts = [str(p).strip().lower() for p in value]
+    axes = tuple(p for p in parts if p)
+    allowed = {"tp", "cp", "pp", "dp"}
+    invalid = [axis for axis in axes if axis not in allowed]
+    if invalid:
+        raise ValueError(
+            f"Unsupported pod_packing_axes {invalid}; expected subset of {sorted(allowed)}"
+        )
+    return axes or _DEFAULT_POD_PACKING_AXES
+
+
+def _pod_packing_group_size(
+    axes: tuple[str, ...],
+    *,
+    tp: int,
+    cp: int,
+    pp: int,
+    dp: int,
+) -> int:
+    values = {"tp": tp, "cp": cp, "pp": pp, "dp": dp}
+    group_size = 1
+    for axis in axes:
+        group_size *= values[axis]
+    return group_size
+
+
+def _passes_pod_packing(
+    *,
+    tp: int,
+    cp: int,
+    pp: int,
+    dp: int,
+    target_ws: int,
+    other_config: Dict[str, Any] | None,
+) -> bool:
+    cfg = other_config or {}
+    gpus_per_node = int(cfg.get("gpus_per_node", 8))
+    if target_ws % gpus_per_node == 0:
+        return True
+    axes = _normalize_pod_packing_axes(cfg.get("pod_packing_axes"))
+    group_size = _pod_packing_group_size(
+        axes, tp=tp, cp=cp, pp=pp, dp=dp
+    )
+    return group_size > 0 and gpus_per_node % group_size == 0
 
 
 def _load_model_spec(model_name: str, quant_preset: Optional[str] = None) -> ModelSpec:
@@ -64,8 +124,10 @@ def _make_system_from_config(config: Dict) -> SystemSpec:
     hw = load_hw(hw_name)
 
     gpus_per_node = config.get("gpus_per_node", 8)
+    world_size_override = None
     if "world_size" in config:
-        nodes = config["world_size"] // gpus_per_node
+        world_size_override = int(config["world_size"])
+        nodes = _ceil_nodes_for_world_size(world_size_override, gpus_per_node)
     else:
         nodes = config.get("nodes", 1)
 
@@ -86,6 +148,7 @@ def _make_system_from_config(config: Dict) -> SystemSpec:
         interconnect=hw.interconnect,
         nodes=nodes,
         gpus_per_node=gpus_per_node,
+        world_size_override=world_size_override,
         host_mem_gb=config.get("host_mem_gb", 256.0),
     )
 
@@ -302,6 +365,12 @@ class TrainingConfigManager:
                         if tp * cp * pp * dp != target_ws:
                             continue
 
+                        if not _passes_pod_packing(
+                            tp=tp, cp=cp, pp=pp, dp=dp,
+                            target_ws=target_ws, other_config=other_config,
+                        ):
+                            continue
+
                         if global_batch > 0:
                             if global_batch % (micro_batch * dp) != 0:
                                 continue
@@ -352,7 +421,7 @@ class TrainingConfigManager:
             model.seq_len = seq_len
             hw = load_hw(hw_name)
             gpus_per_node = grid.get("gpus_per_node", [8])[0] if grid.get("gpus_per_node") else 8
-            nodes = target_ws // gpus_per_node
+            nodes = _ceil_nodes_for_world_size(target_ws, gpus_per_node)
             system = SystemSpec(
                 gpu=GPU(
                     name=hw.name,
@@ -370,6 +439,7 @@ class TrainingConfigManager:
                 interconnect=hw.interconnect,
                 nodes=nodes,
                 gpus_per_node=gpus_per_node,
+                world_size_override=target_ws,
                 host_mem_gb=grid.get("host_mem_gb", [256.0])[0] if grid.get("host_mem_gb") else 256.0,
             )
         except Exception:
@@ -418,7 +488,7 @@ class TrainingConfigManager:
             model.seq_len = seq_len
             hw = load_hw(hw_name)
             gpus_per_node = grid.get("gpus_per_node", [8])[0] if grid.get("gpus_per_node") else 8
-            nodes = target_ws // gpus_per_node
+            nodes = _ceil_nodes_for_world_size(target_ws, gpus_per_node)
             system = SystemSpec(
                 gpu=GPU(
                     name=hw.name,
@@ -436,6 +506,7 @@ class TrainingConfigManager:
                 interconnect=hw.interconnect,
                 nodes=nodes,
                 gpus_per_node=gpus_per_node,
+                world_size_override=target_ws,
                 host_mem_gb=grid.get("host_mem_gb", [256.0])[0] if grid.get("host_mem_gb") else 256.0,
             )
         except FileNotFoundError:
@@ -657,7 +728,7 @@ def export_best_configs_excel(
 
         hw = load_hw(hw_name)
         gpus_per_node = best_config.get("gpus_per_node", 8)
-        nodes = world_size // gpus_per_node
+        nodes = _ceil_nodes_for_world_size(world_size, gpus_per_node)
         system = SystemSpec(
             gpu=GPU(
                 name=hw.name,
@@ -675,6 +746,7 @@ def export_best_configs_excel(
             interconnect=hw.interconnect,
             nodes=nodes,
             gpus_per_node=gpus_per_node,
+            world_size_override=world_size,
             host_mem_gb=best_config.get("host_mem_gb", 256.0),
         )
 

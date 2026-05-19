@@ -52,7 +52,8 @@ def collective_time(c: Collective, group_size: int, link: LinkSpec) -> float:
     cls = link.topology_class
     if cls == "switched_full":
         steps = 1
-    elif cls == "switched_tree":
+    elif cls in ("switched_tree", "clos"):
+        # clos: non-blocking switched → tree latency, full bandwidth.
         steps = max(1, math.ceil(math.log2(N)))
     else:  # ring / torus / unknown
         steps = N - 1

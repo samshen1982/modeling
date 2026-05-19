@@ -77,15 +77,26 @@ class MemorySpec:
 # Topology → cost-law class. Drives both the alpha-beta latency-step count
 # (comm.py) and the bandwidth-derate eligibility (effective_bw_bps below).
 # Unknown topologies fall back to "ring" (conservative: (N-1)-step latency).
-#   switched_full : single-step full connectivity (NVSwitch / full mesh)
-#   switched_tree : switched fabric, recursive-doubling/tree algos (log2 N steps)
-#   ring / torus  : link-local bandwidth, N-independent; (N-1)-step latency
+#   switched_full : single-step full connectivity (NVSwitch / full mesh).
+#                   Non-blocking → full per-card bandwidth, no scale derate.
+#   clos          : non-blocking switched fabric. log2(N) latency like a tree,
+#                   but full per-card bandwidth — NEVER scale-derated (the
+#                   "ideal" reference other fabrics are compared against).
+#   switched_tree : over-subscribable switched fabric (fat-tree); log2(N)
+#                   latency, bandwidth derated by domain scale.
+#   ring / torus  : link-local; (N-1)-step latency, scale-derated.
 _TOPO_CLASS = {
     "nvswitch": "switched_full", "all_to_all": "switched_full",
     "full_mesh": "switched_full",
-    "fat_tree": "switched_tree", "clos": "switched_tree",
+    "clos": "clos",
+    "fat_tree": "switched_tree",
     "ring": "ring", "torus": "torus", "mesh": "torus",
 }
+
+# Classes whose per-card bandwidth degrades as the parallel domain grows
+# beyond the non-blocking radix. clos / switched_full are non-blocking and
+# excluded by construction.
+_SCALE_DERATED = ("switched_tree", "ring", "torus")
 
 
 @dataclass
@@ -117,25 +128,34 @@ class LinkSpec:
     def effective_bw_bps(self, group_size: int = 1) -> float:
         """Effective bandwidth in bytes/s.
 
-        = peak × ``kb_efficiency``, additionally derated by
-        ``oversubscription`` for non-clos switched fabrics once the parallel
-        domain exceeds the non-blocking radix (``num_devices``).
+        = peak × ``kb_efficiency``, then — for the scale-derated classes
+        (fat-tree / ring / torus) — divided by a domain-scale factor::
 
-        clos is non-blocking by definition → leave ``oversubscription`` at
-        1.0 so it never derates; only an explicitly over-subscribed fat-tree
-        sets it > 1.0. ring/torus bandwidth is link-local (N-independent);
-        the algorithmic (N-1)/N data-volume factor lives in comm.py, not here.
+            s = 1 + (oversubscription - 1) · (1 - R/N)        (N > R)
+
+        where N = ``group_size`` and R = non-blocking radix (``num_devices``
+        if > 0, else 0 → the whole link is the over-subscribed tier, e.g.
+        inter-node fat-tree). s is 1.0 at the radix and rises monotonically
+        toward ``oversubscription`` as the domain grows, so bandwidth falls
+        monotonically with scale. Default ``oversubscription`` = 1.0 → s ≡ 1
+        (no derate, bit-identical to peak × kb_efficiency).
+
+        clos and switched_full are non-blocking by construction: they keep
+        full per-card bandwidth at any scale and are NEVER derated (clos is
+        the ideal reference the scale-derated fabrics are measured against).
+        The algorithmic (N-1)/N data-volume factor lives in comm.py.
         """
         base = self.bandwidth_gbps * 1e9 / 8.0 * self.kb_efficiency
         if base <= 0.0:
             return 0.0
-        if self.topology_class == "switched_tree" and self.oversubscription > 1.0:
-            # num_devices <= 0 means "cluster-scale, no non-blocking bound"
-            # (inter-node fat-tree convention): the whole link IS the
-            # over-subscribed spine, so any group crosses it → radix 0.
+        if (
+            self.topology_class in _SCALE_DERATED
+            and self.oversubscription > 1.0
+        ):
             radix = self.num_devices if self.num_devices > 0 else 0
             if group_size > radix:
-                return base / self.oversubscription
+                s = 1.0 + (self.oversubscription - 1.0) * (1.0 - radix / group_size)
+                return base / s
         return base
 
 

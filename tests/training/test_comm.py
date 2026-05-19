@@ -275,14 +275,19 @@ def test_kb_efficiency_scales_bandwidth():
     assert full.effective_bw_bps(8) == pytest.approx(2 * half.effective_bw_bps(8))
 
 
-def test_oversubscription_derates_only_beyond_radix():
-    """switched_tree with oversubscription>1: bw derated only when the
-    parallel domain exceeds the non-blocking radix (num_devices)."""
+def test_oversubscription_continuous_scale_derate():
+    """switched_tree with oversubscription>1: no derate within the
+    non-blocking radix, then a *continuous* monotone derate
+    s = 1 + (os-1)*(1 - R/N) rising toward os as the domain grows."""
     link = LinkSpec(type="IB", bandwidth_gbps=400, latency_us=5.0,
                     topology="fat_tree", num_devices=8, oversubscription=4.0)
     base = 400e9 / 8 * 0.7
-    assert link.effective_bw_bps(8) == pytest.approx(base)        # within radix
-    assert link.effective_bw_bps(64) == pytest.approx(base / 4.0)  # beyond radix
+    assert link.effective_bw_bps(8) == pytest.approx(base)          # at radix → s=1
+    # N=64: s = 1 + 3*(1 - 8/64) = 3.625 (continuous, not the flat /4 step)
+    assert link.effective_bw_bps(64) == pytest.approx(base / 3.625)
+    # monotone decreasing in N, asymptote → base/os
+    assert link.effective_bw_bps(16) > link.effective_bw_bps(64) > link.effective_bw_bps(4096)
+    assert link.effective_bw_bps(10**9) == pytest.approx(base / 4.0, rel=1e-3)
 
 
 def test_oversubscription_applies_on_unbounded_inter_link():
@@ -297,14 +302,38 @@ def test_oversubscription_applies_on_unbounded_inter_link():
     assert link.effective_bw_bps(512) == pytest.approx(base / 4.0)
 
 
-def test_clos_does_not_degrade_with_domain_size():
-    """clos is non-blocking (default oversubscription=1.0): bandwidth is
-    independent of parallel-domain size, yet latency still uses the
-    switched_tree log2 law."""
+def test_clos_is_own_class_never_derates_keeps_log2_latency():
+    """clos is its own class: full per-card bandwidth at any scale (NEVER
+    derated, even if oversubscription is mis-set), but log2(N) latency like
+    a switched tree."""
+    import math
     clos = LinkSpec(type="x", bandwidth_gbps=400, latency_us=5.0,
-                    topology="clos", num_devices=8)
-    assert clos.topology_class == "switched_tree"
-    assert clos.effective_bw_bps(8) == pytest.approx(clos.effective_bw_bps(512))
+                    topology="clos", num_devices=8, oversubscription=4.0)
+    assert clos.topology_class == "clos"
+    # Bandwidth independent of domain size despite oversubscription=4.0.
+    base = 400e9 / 8 * 0.7
+    assert clos.effective_bw_bps(8) == pytest.approx(base)
+    assert clos.effective_bw_bps(4096) == pytest.approx(base)
+
+    # Latency: clos uses the switched-tree log2(N) law, not ring (N-1).
+    S, N = 64 * 1024 * 1024, 64
+    c = Collective("c", "AG", "DP", S, "op1")
+    t = collective_time(c, N, clos)
+    lat = t - S * (N - 1) / N / clos.effective_bw_bps(N)
+    assert lat == pytest.approx(math.ceil(math.log2(N)) * 5e-6, rel=1e-6)
+
+
+def test_clos_beats_fat_tree_at_scale_when_oversubscribed():
+    """The intent of option (i): with an over-subscribed fat-tree, clos keeps
+    full bandwidth while fat-tree degrades with domain size, so clos is
+    strictly faster for a large cross-spine collective."""
+    S, N = 64 * 1024 * 1024, 256
+    clos = LinkSpec(type="x", bandwidth_gbps=400, latency_us=5.0,
+                    topology="clos", num_devices=0)
+    ftree = LinkSpec(type="x", bandwidth_gbps=400, latency_us=5.0,
+                     topology="fat_tree", num_devices=0, oversubscription=4.0)
+    c = Collective("c", "AR", "DP", S, "op1")
+    assert collective_time(c, N, clos) < collective_time(c, N, ftree)
 
 
 def test_effective_flops_override_precedence():

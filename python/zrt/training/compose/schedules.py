@@ -716,23 +716,20 @@ def pipeline_step_time(
     # it (it lives inside StageTime.bwd). Here we split it back OUT of
     # bwd_compute into its own term so the report shows it explicitly.
     #   compute_time = fwd_compute + bwd_compute + recompute_time   (exact)
-    # 0 when no recompute policy (s_bot.recompute == 0); >0 for full/selective.
-    if bwd_compute_per_mb > 0 and s_bot.recompute > 0:
-        rc_frac = min(1.0, s_bot.recompute / bwd_compute_per_mb)
-        step.recompute_time = step.bwd_compute * rc_frac
-        step.bwd_compute -= step.recompute_time
-    else:
-        step.recompute_time = 0.0
-
-    # Raw recompute magnitude: M × the heaviest recomputed stage's per-mb
-    # recompute. This is what recompute "costs" in compute regardless of
-    # whether the pipeline hides it. When the recomputed stage is NOT the
-    # bottleneck, recompute_time (critical path, above) is 0 while this is
-    # > 0 — the work runs inside a faster stage and adds nothing to
-    # step_time. Intentionally NOT part of step_time / compute_time.
+    # Raw recompute is actual work, before pipeline hiding. Critical recompute
+    # below must not include pipeline/bubble scale.
     step.recompute_time_raw = M * max(
         (st.recompute for st in stage_times), default=0.0
     )
+
+    if bwd_compute_per_mb > 0 and s_bot.recompute > 0:
+        bottleneck_recompute = M * s_bot.recompute
+        step.recompute_time = min(
+            step.bwd_compute, bottleneck_recompute, step.recompute_time_raw
+        )
+        step.bwd_compute -= step.recompute_time
+    else:
+        step.recompute_time = 0.0
 
     # ── Hidden comm ───────────────────────────────────────────────────────
     # DP AR hidden in pipeline bubble — independent, exact.

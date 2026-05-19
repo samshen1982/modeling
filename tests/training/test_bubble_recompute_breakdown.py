@@ -184,6 +184,27 @@ def test_recompute_attribution_preserves_step_time():
     assert step.bubble == pytest.approx(step.warmup + step.cooldown)
 
 
+def test_recompute_critical_path_does_not_include_pipeline_bubble():
+    """Critical recompute is actual bottleneck-stage recompute work.
+
+    Pipeline schedule/bubble amplification belongs in bubble/schedule terms;
+    it must not make recompute_time exceed raw recompute work.
+    """
+    model, system = _model(), _system()
+    strategy = Strategy(
+        tp=1, pp=2, dp=1, micro_batch=1, global_batch=8,
+        recompute=RecomputePolicy(per_layer={"dense": {"full"}}),
+    )
+    graph = build_graph(model, strategy)
+
+    step = pipeline_step_time(graph, model, system, strategy)
+    s_bot = max(step.per_stage, key=lambda st: st.fwd + st.bwd)
+
+    assert step.recompute_time_raw > 0.0
+    assert step.recompute_time == pytest.approx(8 * s_bot.recompute)
+    assert step.recompute_time <= step.recompute_time_raw + 1e-9
+
+
 def test_html_export_surfaces_recompute_and_bubble(tmp_path):
     """The HTML report must visibly carry recompute + bubble: JS constants,
     the metric cards, and the step-time breakdown section."""

@@ -166,6 +166,12 @@ class TrainingReport:
     effective_params: int = 0        # P_eff used for MoE-aware accounting
     flops_per_token: float = 0.0     # Actual FLOPs consumed per token
 
+    # v2 mixed-quant HBM traffic diagnostics (per step, in GiB)
+    weight_hbm_gb: float = 0.0
+    act_hbm_gb: float = 0.0
+    grad_hbm_gb: float = 0.0
+    cast_hbm_gb: float = 0.0
+
     # Fused-operator summary (graph-native runs only).
     # Maps fused op_type → {count, sample_names, total_flops_pct, dtype, module_class}.
     fused_ops_summary: dict = field(default_factory=dict)

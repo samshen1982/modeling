@@ -448,6 +448,13 @@ def _recompute_time(
     for op in ops:
         if op.layer_id < 0:
             continue
+        # v2 cast ops: their cost is tied to the consumer's HBM read and
+        # is already counted in the main stage_time loop. Recomputing them
+        # is conceptually "redo the consumer's input cast" — handled as a
+        # 2nd-order effect; the main stage_time path covers it via the
+        # restored consumer fwd time. See §12.7 of mixed_quant_v2 doc.
+        if op.kind == "cast":
+            continue
         lk = model.layers[op.layer_id].value if op.layer_id < len(model.layers) else ""
         cats = policy.get(lk, set())
         if not cats:
@@ -480,6 +487,11 @@ def _ep_parallel_fraction(
     t_total = 0.0
     t_ep = 0.0
     for op in ops:
+        if op.kind == "cast":
+            # cast ops are neither EP-parallel nor representative of
+            # compute time — exclude from both numerator and denominator
+            # of the imbalance fraction.
+            continue
         cost = op_cost(op, model, system)
         if cost.fwd_cube_flops > 0 or cost.fwd_vector_flops > 0 or cost.fwd_bytes > 0:
             op_dtype = _resolve_compute_dtype(op, model)

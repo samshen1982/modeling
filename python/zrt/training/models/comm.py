@@ -472,9 +472,14 @@ def pp_p2p_time(
         return 0.0
 
     cp = max(strategy.cp, 1)
+    # v2: PP transfers the residual stream between adjacent stages. Use
+    # ``effective_residual_dtype()`` so a future "FP8 residual" experiment
+    # can swap this without touching the call sites; today it resolves to
+    # ``act_dtype`` (BF16) and the numerical result is unchanged.
+    residual_bytes = model.effective_residual_dtype().bytes
     act_bytes = (
         strategy.micro_batch * (model.seq_len // cp) * model.hidden
-        * model.act_dtype.bytes // max(strategy.tp, 1)
+        * residual_bytes // max(strategy.tp, 1)
     )
 
     if domain is None:

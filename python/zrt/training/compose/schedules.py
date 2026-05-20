@@ -114,6 +114,17 @@ class StepResult:
     # Total comm volume = exposed + hidden
     total_comm_volume: float = 0.0  # All comm in step
 
+    # ── v2 mixed-quant HBM traffic diagnostics ───────────────────────────
+    # Per-step HBM bytes attributed to each operand role. ``weight_hbm_gb``
+    # drops when routed_expert_weight_dtype switches BF16 → FP4; ``cast_hbm_gb``
+    # is 0 when QuantPolicy.assume_all_casts_fused is True and grows when
+    # the user opts into unfused diagnostics. All values cover one full
+    # training step (M microbatches × per-stage ops, scaled to bottleneck).
+    weight_hbm_gb: float = 0.0
+    act_hbm_gb: float = 0.0
+    grad_hbm_gb: float = 0.0
+    cast_hbm_gb: float = 0.0
+
     def __post_init__(self) -> None:
         # Absolute pipeline-idle time. Derived once here so every composer
         # (and the pp=1 path) gets it without duplicating the expression.
@@ -813,6 +824,12 @@ def pipeline_step_time(
     # Memory breakdown
     step.memory = memory_breakdown(graph, model, system, strategy)
 
+    # v2 HBM traffic diagnostics. Aggregate per-step bytes by operand
+    # role for the entire graph (× M microbatches per step). This is a
+    # report-only signal — the values are NOT on the critical path of
+    # any composer / mfu calculation. See §4.8 of the v2 doc.
+    _populate_hbm_traffic(step, graph, model, system, strategy)
+
     # MFU uses pipeline_time (excludes optimizer, per design doc §5.5.2)
     step.mfu = compute_mfu(model, strategy, system, step.pipeline_time, graph)
 
@@ -825,6 +842,78 @@ def pipeline_step_time(
     step.step_time = step.pipeline_time + step.optimizer_time + step.optimizer_comm
 
     return step
+
+
+def _populate_hbm_traffic(
+    step: "StepResult", graph: Graph, model: ModelSpec,
+    system: SystemSpec, strategy: Strategy,
+) -> None:
+    """Sum per-op HBM bytes by operand role and write into ``step``.
+
+    Splits each matmul's ``fwd_bytes`` into the (A, W, C) terms using the
+    ``OpDtypeBundle`` to avoid double-counting. Attention / elementwise
+    ops contribute to ``act_hbm``. Backward bytes (dx + dw) go to
+    ``grad_hbm``. cast ops feed ``cast_hbm`` independently.
+
+    Multiplied by ``M = num_microbatches()`` and divided by 1 GiB (== 2**30
+    bytes) at the end. Result is **per-step per-rank** — the graph is
+    already TP/EP-sharded by build_graph.
+    """
+    from zrt.training.models.flops import op_cost as _op_cost
+    from zrt.training.models.quant import resolve_op_dtypes as _bundle
+
+    GB = float(1 << 30)
+    M = max(1, strategy.num_microbatches())
+
+    weight_bytes = 0.0
+    act_bytes = 0.0
+    grad_bytes = 0.0
+    cast_bytes = 0.0
+
+    for op in graph.ops:
+        cost = _op_cost(op, model, system)
+        if op.kind == "cast":
+            cast_bytes += cost.fwd_bytes + cost.dx_bytes
+            continue
+
+        # Forward: split bytes into weight vs activation if matmul.
+        if op.kind == "matmul":
+            d = _bundle(op, model)
+            # _matmul_cost rebuilds these shapes; recompute to split.
+            meta_k = op.meta.get("k", 0)
+            use_meta = (
+                op.meta.get("fused_weight_dims", False)
+                or not op.inputs or not op.outputs
+                or (meta_k > 0 and op.inputs[0].shape_logical[-1] != meta_k)
+            )
+            if use_meta:
+                m = op.meta.get("m", 0)
+                n = op.meta.get("n_local", op.meta.get("n", 0))
+                k = op.meta.get("k_local", op.meta.get("k", 0))
+            else:
+                m = op.inputs[0].shape_local[0]
+                k = op.inputs[0].shape_local[-1]
+                n = op.outputs[0].shape_local[-1]
+            mult = op.meta.get("fwd_multiplier", 1.0)
+            # Apply fwd_multiplier the same way _matmul_cost folds it into
+            # FLOPs; for bytes the routed-expert fused op visits each of
+            # the top_k expert tiles, so weight/act/grad bytes scale too.
+            scale = float(mult)
+            weight_bytes += scale * (k * n * d.weight.stored_bytes
+                                     + k * n * d.weight.stored_bytes  # dx reads W
+                                     + k * n * d.grad_weight.stored_bytes)  # dw writes dW
+            act_bytes += scale * (m * k * d.in_act.bytes + m * n * d.out_act.bytes)
+            grad_bytes += scale * (m * n * d.grad_in.bytes + m * k * d.grad_act.bytes
+                                    + m * n * d.grad_in.bytes + m * k * d.in_act.bytes)
+        else:
+            # Non-matmul: lump all fwd bytes into act, bwd into grad.
+            act_bytes += cost.fwd_bytes
+            grad_bytes += cost.dx_bytes + cost.dw_bytes
+
+    step.weight_hbm_gb = weight_bytes * M / GB
+    step.act_hbm_gb = act_bytes * M / GB
+    step.grad_hbm_gb = grad_bytes * M / GB
+    step.cast_hbm_gb = cast_bytes * M / GB
 
 
 def _assign_stages(model: ModelSpec, strategy: Strategy) -> list[list[int]]:

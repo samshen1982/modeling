@@ -738,6 +738,9 @@ class TrainingPipelinePass(GraphPass):
             fwd_compute_ms *= layer_scale
             bwd_compute_ms *= layer_scale
             recompute_compute_ms *= layer_scale
+        # fwd_compute_ms uses full forward latency, including activation-save
+        # overhead. recompute_compute_ms is the checkpoint replay time split
+        # out for reporting, so total compute is the explicit sum below.
         compute_time_ms = fwd_compute_ms + bwd_compute_ms + recompute_compute_ms
 
         metrics = PipelineStepMetrics(

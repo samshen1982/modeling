@@ -1364,6 +1364,9 @@ class TrainingGraphExcelWriter(TransformedGraphExcelWriter):
             n for n in bwd_graph.nodes.values()
             if is_external_recompute_node(n)
             or (
+                # Legacy/imported graphs may carry recompute only in attrs.
+                # Keep those visible while still excluding kernels with
+                # internal replay such as FlashAttention/SDPA.
                 n.attrs.get("recompute", False)
                 and not n.annotations.get("recompute")
                 and not has_internal_recompute(n)

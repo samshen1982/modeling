@@ -24,6 +24,10 @@ from python.zrt.transform.context import (
     TrainingConfig,
     TransformContext,
 )
+from python.zrt.transform.training.recompute import (
+    has_internal_recompute,
+    is_external_recompute_node,
+)
 
 
 def _make_graph(nodes=None, metadata=None):
@@ -701,6 +705,26 @@ def test_flash_attention_internal_recompute_is_not_external_checkpoint_replay():
     g = RooflinePass().run(g, ctx)
     assert g.nodes["fa_bwd"].annotations["recompute_flops"] == 0
     assert g.nodes["fa_bwd"].annotations["recompute_latency_us"] == 0.0
+
+
+def test_recompute_helper_classifies_internal_attention_kernels():
+    assert has_internal_recompute(OpNode(id="flash", op_type="flash_attn_fwd"))
+    assert has_internal_recompute(OpNode(id="sdpa", op_type="aten.sdpa.default"))
+    assert has_internal_recompute(
+        OpNode(id="scaled_dot", op_type="aten.scaled_dot_product_attention.default")
+    )
+    assert not has_internal_recompute(OpNode(id="mm", op_type="aten.mm.default"))
+    assert not has_internal_recompute(OpNode(id="silu", op_type="aten.silu.default"))
+
+
+def test_recompute_helper_classifies_external_checkpoint_replay():
+    mm = OpNode(id="mm", op_type="aten.mm.default", annotations={"recompute": True})
+    flash = OpNode(id="flash", op_type="flash_attn_fwd", annotations={"recompute": True})
+    plain = OpNode(id="plain", op_type="aten.mm.default")
+
+    assert is_external_recompute_node(mm)
+    assert not is_external_recompute_node(flash)
+    assert not is_external_recompute_node(plain)
 
 
 def test_integration_flops_pass_computes_training_annotations():

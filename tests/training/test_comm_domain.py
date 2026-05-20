@@ -26,7 +26,7 @@ from zrt.training.models.comm import (
 from zrt.training.spec.model import LayerKind, ModelSpec
 from zrt.training.spec.strategy import OptKind, Strategy
 from zrt.training.spec.system import GPU, SystemSpec
-from zrt.training.topology import CommDomain, build_comm_domain
+from zrt.training.topology import CommDomain, build_comm_domain, comm_domain_report
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -80,6 +80,19 @@ def test_comm_domain_picks_innermost_tier_for_tp_fitting_one_tray():
     assert d.group_size("TP") == 4
     assert d.tier("TP") == 0
     assert d.link("TP").type == "NVLink5"
+
+
+def test_comm_domain_report_rejects_empty_interconnect_tiers():
+    sys = SystemSpec(
+        gpu=GPU(name="test", flops_bf16=1, flops_fp8=2, hbm_gb=1, hbm_bw_gbps=1),
+        host_mem_gb=1,
+        interconnect=InterconnectSpec(tiers=[]),
+        nodes=1,
+        gpus_per_node=1,
+    )
+
+    with pytest.raises(ValueError, match="interconnect.*tiers"):
+        comm_domain_report(sys, Strategy())
 
 
 def test_comm_domain_bumps_tp_to_rack_when_crossing_trays():

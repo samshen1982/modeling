@@ -136,6 +136,8 @@ def export_estimate_excel(
          f"{report.pp_exposed_ms / report.step_time_ms * 100:.1f}%" if report.step_time_ms > 0 and report.pp_exposed_ms > 0 else "-"],
         ["    DP (AR/RS)", f"{report.dp_exposed_ms:.2f}" if report.dp_exposed_ms > 0 else "-",
          f"{report.dp_exposed_ms / report.step_time_ms * 100:.1f}%" if report.step_time_ms > 0 and report.dp_exposed_ms > 0 else "-"],
+        ["  Pipeline Bubble", f"{report.bubble_time_ms:.2f}" if report.bubble_time_ms > 0 else "0.00",
+         f"{report.bubble_time_ms / report.step_time_ms * 100:.1f}%" if report.step_time_ms > 0 and report.bubble_time_ms > 0 else "0.0%"],
         ["  Optimizer (compute)", f"{report.optimizer_time_ms:.2f}" if report.optimizer_time_ms > 0 else "-",
          f"{report.optimizer_time_ms / report.step_time_ms * 100:.1f}%" if report.step_time_ms > 0 and report.optimizer_time_ms > 0 else "-"],
         ["  Optimizer (comm)", f"{report.optimizer_comm_ms:.2f}" if report.optimizer_comm_ms > 0 else "-",

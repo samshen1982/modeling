@@ -145,6 +145,8 @@ class CommDomain:
         picked by :func:`zrt.training.topology._tier_for_groups`.
         """
         kind = kind.upper()
+        if not self.system.interconnect.tiers:
+            raise ValueError("interconnect has no tiers configured")
         if kind in self.groups.tier:
             return self.groups.tier[kind].primary_tier
         # Fall back to a 2-tier heuristic identical to the legacy

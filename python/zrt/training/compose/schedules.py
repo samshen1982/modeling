@@ -42,7 +42,7 @@ class StepResult:
 
     Strict invariants (all in seconds):
       step_time        = pipeline_time + optimizer_time + optimizer_comm
-      pipeline_time    = compute_time + exposed_comm
+      pipeline_time    = compute_time + exposed_comm + bubble
       compute_time     = fwd_compute + bwd_compute + recompute_time
       bubble           = warmup + cooldown   (absolute pipeline idle, seconds)
       exposed_comm     = tp_exposed + cp_exposed + ep_exposed + pp_exposed + dp_exposed
@@ -52,7 +52,7 @@ class StepResult:
 
     # ── Core step timing ──────────────────────────────────────────────────
     step_time: float = 0.0  # Total step time (seconds)
-    pipeline_time: float = 0.0  # Pipeline time = compute_time + exposed_comm
+    pipeline_time: float = 0.0  # Pipeline time = compute_time + exposed_comm + bubble
     optimizer_time: float = 0.0  # Optimizer step compute
     optimizer_comm: float = 0.0  # Optimizer step comm exposed on critical path (post-hide)
     optimizer_comm_hidden: float = 0.0  # Optimizer AG hidden under NS compute (Moonshot rotation)
@@ -85,7 +85,7 @@ class StepResult:
     steady_per_mb: float = 0.0
 
     # ── Compute / comm breakdown (set by pipeline_step_time) ─────────────
-    compute_time: float = 0.0  # Pure compute on critical path
+    compute_time: float = 0.0  # Useful compute on critical path, excluding bubble
     fwd_compute: float = 0.0  # Forward compute only (excludes all comm)
     bwd_compute: float = 0.0  # Backward compute only (excludes comm AND recompute)
     recompute_time: float = 0.0  # Activation-recompute fwd-redo on critical path.
@@ -659,25 +659,81 @@ def pipeline_step_time(
     comm_times = total_comm_time(graph, model, system, strategy, domain=domain)
     dp_ar_time = comm_times.get("dp_grad_reduce", 0.0)
 
-    # Add PP P2P per-microbatch cost to each stage's fwd and bwd
+    # ── PP P2P + recompute placement (schedule-specific) ─────────────────
+    # Both pp_p2p (activation send per stage boundary) and recompute
+    # (forward redo for backward) are backward-side overhead. The model
+    # decides where they sit on the timeline based on schedule semantics:
+    #
+    #   • Serial (1F1B / VPP / ZB)
+    #       PP P2P is added once to fwd and once to bwd (boundary send each
+    #       direction). Recompute is added to bwd_dx (lives inside backward
+    #       critical path, as it physically does). Behavior is bit-exact
+    #       with the legacy ``t_bwd_dx += recompute_t`` (stage.py) +
+    #       ``+= pp_p2p`` (here) — see test_anchor_step_time_strict.
+    #
+    #   • Dual-stream (DualPipe / DualPipeV)
+    #       The W (bwd_dw) phase runs on a second stream parallel with
+    #       activation P2P + recompute. Only the residual beyond ``bwd_dw``
+    #       extent stays on the critical path; the hidden share is split
+    #       proportionally between pp_p2p and recompute so the report
+    #       attributes each correctly.
+    #
+    # We track the exposed amounts per-stage so:
+    #   (a) per-stage recompute distribution is preserved for the
+    #       non-bottleneck-hidden-by-bottleneck case
+    #       (tests/training/test_bubble_recompute_breakdown.py::test_dense_recompute_pipeline_hidden_raw_visible)
+    #   (b) post-compose pp_exposed extraction uses the bottleneck stage's
+    #       exposed sum, not a hardcoded ``2*pp_p2p``.
     pp_p2p = comm_times.get("pp_p2p", 0.0)
-    if pp_p2p > 0:
+    is_dual = strategy.pp_schedule in (PPSched.DUALPIPE, PPSched.DUALPIPE_V)
+    # Capture raw recompute max BEFORE augmentation — recompute_time_raw
+    # uses this (the work that would be done if nothing hid it).
+    recompute_raw_per_mb = max((st.recompute for st in stage_times), default=0.0)
+
+    pp_p2p_fwd_exposed: list[float] = []
+    pp_p2p_bwd_exposed: list[float] = []
+    recompute_exposed: list[float] = []
+    for st in stage_times:
+        if pp == 1 or not is_dual:
+            pp_p2p_fwd_exposed.append(pp_p2p)
+            pp_p2p_bwd_exposed.append(pp_p2p)
+            recompute_exposed.append(st.recompute)
+            continue
+        # Dual-stream hide. 2x pp_p2p (one fwd-boundary + one bwd-boundary
+        # per mb) and st.recompute compete for the bwd_dw budget on this
+        # stage. Allocate the residual proportionally so the report
+        # attributes the exposed share to each source.
+        total_to_hide = 2.0 * pp_p2p + st.recompute
+        if total_to_hide <= 0:
+            pp_p2p_fwd_exposed.append(0.0)
+            pp_p2p_bwd_exposed.append(0.0)
+            recompute_exposed.append(0.0)
+            continue
+        residual = max(0.0, total_to_hide - st.bwd_dw)
+        pp_p2p_share = residual * (2.0 * pp_p2p) / total_to_hide
+        # Split the pp_p2p residual evenly between fwd and bwd boundaries.
+        pp_p2p_fwd_exposed.append(pp_p2p_share / 2.0)
+        pp_p2p_bwd_exposed.append(pp_p2p_share / 2.0)
+        recompute_exposed.append(residual * st.recompute / total_to_hide)
+
+    if pp_p2p > 0 or recompute_raw_per_mb > 0:
         stage_times = [
             StageTime(
-                fwd=st.fwd + pp_p2p,
-                bwd=st.bwd + pp_p2p,
-                bwd_dx=st.bwd_dx + pp_p2p,
+                fwd=st.fwd + pp_p2p_fwd_exposed[i],
+                # bwd = bwd_dx + bwd_dw, so adding to bwd_dx propagates to bwd.
+                bwd=st.bwd + pp_p2p_bwd_exposed[i] + recompute_exposed[i],
+                bwd_dx=st.bwd_dx + pp_p2p_bwd_exposed[i] + recompute_exposed[i],
                 bwd_dw=st.bwd_dw,
-                comm_fwd=st.comm_fwd + pp_p2p,
-                comm_bwd=st.comm_bwd + pp_p2p,
+                comm_fwd=st.comm_fwd + pp_p2p_fwd_exposed[i],
+                comm_bwd=st.comm_bwd + pp_p2p_bwd_exposed[i],
                 ep_hidden=st.ep_hidden,
                 tp_hidden=st.tp_hidden,
                 tp_exposed=st.tp_exposed,
                 ep_exposed=st.ep_exposed,
                 cp_exposed=st.cp_exposed,
-                recompute=st.recompute,
+                recompute=recompute_exposed[i],
             )
-            for st in stage_times
+            for i, st in enumerate(stage_times)
         ]
 
     # Compose according to schedule
@@ -691,7 +747,7 @@ def pipeline_step_time(
     # Placed after compose() so step.pipeline_time / step.dp_exposed are final.
     #
     # Invariants enforced here:
-    #   pipeline_time    = compute_time + exposed_comm            (exact)
+    #   pipeline_time    = compute_time + exposed_comm + bubble   (exact)
     #   exposed_comm     = tp + cp + ep + pp + dp _exposed       (exact)
     #   hidden_comm      = dp_hidden + tp_hidden + ep_hidden      (exact)
     #   total_comm_volume = exposed_comm + hidden_comm            (exact)
@@ -700,22 +756,34 @@ def pipeline_step_time(
     # (TP CoC/MC2 and EP wave-overlap applied inside stage_time()).
     # The bottleneck stage ratio gives a schedule-agnostic critical-path split.
 
-    s_bot = max(stage_times, key=lambda st: st.fwd + st.bwd)
+    bot_idx, s_bot = max(
+        enumerate(stage_times), key=lambda kv: kv[1].fwd + kv[1].bwd
+    )
     bot_total = s_bot.fwd + s_bot.bwd
 
-    # pipeline_time excludes the exposed DP AR tail (which sits after cooldown)
-    _pipeline_time = step.pipeline_time - step.dp_exposed
+    # Non-bubble pipeline work excludes the warmup/cooldown bubble and the
+    # exposed DP AR tail (which sits after cooldown). This is the useful
+    # stage work used to attribute compute vs exposed comm.
+    _useful_pipeline_time = max(
+        0.0, step.pipeline_time - step.dp_exposed - step.bubble,
+    )
 
     # ── Exposed comm: bottom-up from per-type fields ─────────────────────
     # Scale each comm type's exposed time directly from bottleneck stage.
     # No remain, no ratio splits, no conservation caps.
     # Invariant: tp + ep + cp + pp + dp = exposed_comm (by construction)
     if bot_total > 0:
-        scale = _pipeline_time / bot_total
+        scale = _useful_pipeline_time / bot_total
         step.tp_exposed = scale * s_bot.tp_exposed
         step.ep_exposed = scale * s_bot.ep_exposed
         step.cp_exposed = scale * s_bot.cp_exposed
-        step.pp_exposed = scale * 2.0 * pp_p2p
+        # PP exposed: bottleneck stage's exposed fwd+bwd boundary cost
+        # (already schedule-adjusted in the augmentation block above).
+        # For 1F1B/VPP/ZB this is ``2*pp_p2p`` (bit-exact with legacy).
+        # For DualPipe(V) it is the residual share after bwd_dw hides.
+        step.pp_exposed = scale * (
+            pp_p2p_fwd_exposed[bot_idx] + pp_p2p_bwd_exposed[bot_idx]
+        )
         step.tp_hidden = scale * s_bot.tp_hidden
         step.ep_hidden = scale * s_bot.ep_hidden
     else:
@@ -725,8 +793,8 @@ def pipeline_step_time(
     exposed_comm_excl_dp = (step.tp_exposed + step.ep_exposed
                             + step.cp_exposed + step.pp_exposed)
     step.exposed_comm = exposed_comm_excl_dp + step.dp_exposed
-    # compute_time exact: compute_time + exposed_comm == pipeline_time (by construction from composer)
-    step.compute_time = step.pipeline_time - step.exposed_comm
+    # compute_time exact: compute + exposed comm + bubble == pipeline_time.
+    step.compute_time = max(0.0, step.pipeline_time - step.exposed_comm - step.bubble)
 
     # Split compute_time into fwd vs bwd using bottleneck stage ratios.
     # Each stage's fwd/bwd already includes embedded exposed comm, so we
@@ -744,16 +812,20 @@ def pipeline_step_time(
         step.bwd_compute = 0.0
 
     # ── Recompute as its own term, attributed out of bwd_compute ──────────
-    # Recompute (activation-recompute fwd redo) is physically on the backward
-    # critical path, so the composer timeline and step_time already include
-    # it (it lives inside StageTime.bwd). Here we split it back OUT of
-    # bwd_compute into its own term so the report shows it explicitly.
+    # Recompute (activation-recompute fwd redo) is backward-side work. For
+    # serial schedules (1F1B / VPP / ZB) it sits on the critical path and
+    # the augmentation block above adds it to bwd_dx so the composer
+    # timeline carries it; we then split it back OUT here so the report
+    # shows it as its own term:
     #   compute_time = fwd_compute + bwd_compute + recompute_time   (exact)
-    # Raw recompute is actual work, before pipeline hiding. Critical recompute
-    # below must not include pipeline/bubble scale.
-    step.recompute_time_raw = M * max(
-        (st.recompute for st in stage_times), default=0.0
-    )
+    # For DualPipe(V) the augmentation already trimmed st.recompute to the
+    # post-bwd_dw-hide residual, so ``M * s_bot.recompute`` is the exposed
+    # critical-path portion (the hidden part is absorbed by bwd_dw).
+    #
+    # recompute_time_raw is the work that WOULD be done if nothing hid it
+    # (M × max across stages, pre-augmentation). recompute_time_raw stays a
+    # reporting field — it does not affect step_time.
+    step.recompute_time_raw = M * recompute_raw_per_mb
 
     if bwd_compute_per_mb > 0 and s_bot.recompute > 0:
         bottleneck_recompute = M * s_bot.recompute

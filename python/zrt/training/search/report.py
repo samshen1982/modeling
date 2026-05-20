@@ -133,6 +133,8 @@ def report_summary(report: Report) -> str:
         if report.dp_exposed_ms > 0:
             lines.append(f"    {'DP (AR/RS)':<36s} {report.dp_exposed_ms:>10.2f} {report.dp_exposed_ms/st*100:>7.1f}%")
 
+        lines.append(f"  {'Pipeline Bubble':<38s} {report.bubble_time_ms:>10.2f} {report.bubble_time_ms/st*100:>7.1f}%")
+
         # Optimizer
         if report.optimizer_time_ms > 0:
             lines.append(f"  {'Optimizer (compute)':<38s} {report.optimizer_time_ms:>10.2f} {report.optimizer_time_ms/st*100:>7.1f}%")

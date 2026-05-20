@@ -489,6 +489,8 @@ def _build_summary(report, graph, model, system, strategy, op_dicts: list[dict])
             "compute_time_ms": getattr(report, "compute_time_ms", 0.0),
             "exposed_comm_ms": getattr(report, "exposed_comm_ms", 0.0),
             "hidden_comm_ms": getattr(report, "hidden_comm_ms", 0.0),
+            "recompute_time_ms": getattr(report, "recompute_time_ms", 0.0),
+            "recompute_time_raw_ms": getattr(report, "recompute_time_raw_ms", 0.0),
             "optimizer_time_ms": getattr(report, "optimizer_time_ms", 0.0),
             "optimizer_comm_ms": getattr(report, "optimizer_comm_ms", 0.0),
             "tokens_per_sec": getattr(report, "tokens_per_sec", 0.0),
@@ -496,6 +498,7 @@ def _build_summary(report, graph, model, system, strategy, op_dicts: list[dict])
             "hfu": getattr(report, "hfu", 0.0),
             "mfu_native": getattr(report, "mfu_native", 0.0),
             "bubble_fraction": getattr(report, "bubble_fraction", 0.0),
+            "bubble_time_ms": getattr(report, "bubble_time_ms", 0.0),
             "flops_per_token": getattr(report, "flops_per_token", 0.0),
             "total_flops": getattr(report, "total_flops", 0.0),
         },
@@ -1229,7 +1232,7 @@ function renderSummary() {
         <div>pipeline time</div><div>${fmt.ms(p.pipeline_time_ms)}</div>
         <div>compute time</div><div>${fmt.ms(p.compute_time_ms)}</div>
         <div>exposed comm</div><div>${fmt.ms(p.exposed_comm_ms)}</div>
-        <div>hidden comm</div><div>${fmt.ms(p.hidden_comm_ms)}</div>
+        <div>pipeline bubble</div><div>${fmt.ms(p.bubble_time_ms)}</div>
       </div>
       <div class="card kv">
         <div>optimizer time</div><div>${fmt.ms(p.optimizer_time_ms)}</div>
@@ -1243,6 +1246,16 @@ function renderSummary() {
         <div>DP exposed</div><div>${fmt.ms(s.comm_breakdown.dp_exposed_ms)}</div>
         <div>comm volume</div><div>${fmt.ms(s.comm_breakdown.total_comm_volume_ms)}</div>
       </div>
+    </div>
+
+    <h3>step time breakdown</h3>
+    <div class="card kv">
+      <div>Useful Compute</div><div>${fmt.ms(p.compute_time_ms)}</div>
+      <div>Recompute (crit. path)</div><div>${fmt.ms(p.recompute_time_ms || 0)}</div>
+      <div>Communication (exposed)</div><div>${fmt.ms(p.exposed_comm_ms)}</div>
+      <div>Pipeline Bubble</div><div>${fmt.ms(p.bubble_time_ms)}</div>
+      <div>Optimizer (compute)</div><div>${fmt.ms(p.optimizer_time_ms)}</div>
+      <div>Optimizer (comm)</div><div>${fmt.ms(p.optimizer_comm_ms)}</div>
     </div>
 
     <h3>内存消耗结果</h3>

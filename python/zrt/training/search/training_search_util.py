@@ -726,6 +726,7 @@ def format_results(reports: List[TrainingReport], configs: List[Dict]) -> pd.Dat
             memory_gb = None
 
         d.update(_comm_domain_columns_from_config(cfg))
+        d["compute_time_ms"] = round(report.compute_time_ms, 2)
         d["fwd_compute_ms"] = round(report.fwd_compute_ms, 2)
         d["bwd_compute_ms"] = round(report.bwd_compute_ms, 2)
         d["exposed_comm_ms"] = round(report.exposed_comm_ms, 2)
@@ -768,7 +769,7 @@ def format_results(reports: List[TrainingReport], configs: List[Dict]) -> pd.Dat
     if not df.empty:
         df = df.sort_values("mfu", ascending=False)
 
-    metric_cols = ["fwd_compute_ms", "bwd_compute_ms", "exposed_comm_ms",
+    metric_cols = ["compute_time_ms", "fwd_compute_ms", "bwd_compute_ms", "exposed_comm_ms",
                    "tp_total_ms", "tp_exposed_ms", "cp_total_ms", "cp_exposed_ms",
                    "ep_total_ms", "ep_exposed_ms", "pp_total_ms", "pp_exposed_ms",
                    "dp_total_ms", "dp_exposed_ms",

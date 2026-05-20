@@ -4,10 +4,15 @@ RED→GREEN regression for:
   1. StepResult.bubble = warmup + cooldown (absolute seconds), 0 when pp=1.
   2. StepResult.recompute_time = 0 with no recompute policy, > 0 when
      full/partial recompute is enabled.
-  3. recompute attributed OUT of bwd_compute:
+  3. bubble attributed OUT of compute_time:
+     pipeline_time == compute_time + exposed_comm + bubble
+  4. recompute attributed OUT of bwd_compute:
      compute_time == fwd_compute + bwd_compute + recompute_time
-  4. step_time identity preserved (attribution does not change totals).
+  5. step_time identity preserved (attribution does not change totals).
 """
+
+import shutil
+from pathlib import Path
 
 import pytest
 
@@ -108,6 +113,22 @@ def test_recompute_excluded_from_bwd_compute_invariant():
     )
 
 
+def test_pipeline_bubble_excluded_from_compute_time_invariant():
+    model, system = _model(), _system()
+    strategy = Strategy(tp=1, pp=2, dp=4, micro_batch=1, global_batch=8)
+    graph = build_graph(model, strategy)
+
+    step = pipeline_step_time(graph, model, system, strategy)
+
+    assert step.bubble > 0.0
+    assert step.pipeline_time == pytest.approx(
+        step.compute_time + step.exposed_comm + step.bubble, rel=1e-6
+    )
+    assert step.compute_time == pytest.approx(
+        step.fwd_compute + step.bwd_compute + step.recompute_time, rel=1e-6
+    )
+
+
 def test_recompute_raw_zero_without_policy():
     model, system = _model(), _system()
     strategy = Strategy(tp=1, pp=1, dp=1, micro_batch=1, global_batch=4)
@@ -175,10 +196,9 @@ def test_recompute_attribution_preserves_step_time():
 
     step = pipeline_step_time(graph, model, system, strategy)
 
-    # pipeline_time = compute_time + exposed_comm, with compute_time now
-    # carrying the recompute term explicitly.
+    # pipeline_time = useful compute + exposed comm + pipeline bubble.
     assert step.pipeline_time == pytest.approx(
-        step.compute_time + step.exposed_comm, rel=1e-6
+        step.compute_time + step.exposed_comm + step.bubble, rel=1e-6
     )
     assert step.recompute_time > 0.0
     assert step.bubble == pytest.approx(step.warmup + step.cooldown)
@@ -205,7 +225,7 @@ def test_recompute_critical_path_does_not_include_pipeline_bubble():
     assert step.recompute_time <= step.recompute_time_raw + 1e-9
 
 
-def test_html_export_surfaces_recompute_and_bubble(tmp_path):
+def test_html_export_surfaces_recompute_and_bubble():
     """The HTML report must visibly carry recompute + bubble: JS constants,
     the metric cards, and the step-time breakdown section."""
     from zrt.training.io.html_exporter import export_estimate_html
@@ -222,20 +242,25 @@ def test_html_export_surfaces_recompute_and_bubble(tmp_path):
     report = estimate(model, system, strategy, graph=graph)
     op_costs = {op.name: op_cost(op, model, system) for op in graph.ops}
 
-    out = tmp_path / "r.html"
-    export_estimate_html(report=report, graph=graph, model=model,
-                         system=system, strategy=strategy,
-                         op_costs=op_costs, output_path=out)
-    html = out.read_text(encoding="utf-8")
+    out_dir = Path("output") / "test_html_bubble_recompute"
+    if out_dir.exists():
+        shutil.rmtree(out_dir)
+    try:
+        out = out_dir / "r.html"
+        export_estimate_html(report=report, graph=graph, model=model,
+                             system=system, strategy=strategy,
+                             op_costs=op_costs, output_path=out)
+        html = out.read_text(encoding="utf-8")
 
-    assert "const RECOMPUTE_MS = " in html
-    assert "const RECOMPUTE_RAW_MS = " in html
-    assert "const BREAKDOWN = {" in html
-    assert "function buildBreakdown()" in html
-    assert "buildMetrics() + buildBreakdown()" in html
-    assert "Recompute (crit. path)" in html
-    assert "step time breakdown" in html
-    assert report.recompute_time_ms > 0.0  # this config does recompute
+        assert '"recompute_time_ms"' in html
+        assert '"recompute_time_raw_ms"' in html
+        assert "Recompute (crit. path)" in html
+        assert "step time breakdown" in html
+        assert "pipeline bubble" in html
+        assert report.recompute_time_ms > 0.0  # this config does recompute
+    finally:
+        if out_dir.exists():
+            shutil.rmtree(out_dir)
 
 
 def test_search_report_surfaces_bubble_and_recompute():
@@ -259,6 +284,7 @@ def test_search_report_surfaces_bubble_and_recompute():
 
     txt = report_summary(report)
     assert "Recompute (critical path)" in txt
+    assert "Pipeline Bubble" in txt
     assert "Recompute (pre/post pipeline-hide)" in txt
     assert "raw (pre-hide, NOT in step)" in txt
     assert f"({report.bubble_time_ms:.1f} ms)" in txt
@@ -290,7 +316,12 @@ def test_search_results_table_has_recompute_columns():
     report = estimate(model, system, strategy)
     df = format_results([report], [{"model": "m"}])
 
-    for col in ("recompute_time_ms", "recompute_time_raw_ms",
+    for col in ("compute_time_ms", "recompute_time_ms", "recompute_time_raw_ms",
                 "bubble_time_ms", "bubble_fraction"):
         assert col in df.columns, f"{col} missing from results table"
+    row = df.iloc[0]
+    assert row["pipeline_time_ms"] == pytest.approx(
+        row["compute_time_ms"] + row["exposed_comm_ms"] + row["bubble_time_ms"],
+        abs=0.01,
+    )
     assert df.iloc[0]["recompute_time_raw_ms"] > 0.0

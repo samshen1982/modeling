@@ -206,14 +206,22 @@ def stage_time(
         t_bwd_dx += dx_t
         t_bwd_dw += dw_t
 
-    # Recompute: re-do forward for selected ops before backward. It stays
-    # inside t_bwd_dx (it IS on the backward critical path, so the pipeline
-    # timeline and step_time are unchanged), but we also track it separately
-    # so the report can surface it as its own term instead of burying it in
-    # backward compute. t_recompute is carried through the same EP-imbalance
-    # scaling as bwd below, keeping the two consistent.
+    # Recompute: re-do forward for selected ops before backward. Returned
+    # as a SEPARATE field — NOT folded into ``t_bwd_dx`` — because schedule
+    # semantics decide whether recompute sits on the critical path or
+    # overlaps with the W (bwd_dw) stream:
+    #
+    #   - 1F1B / VPP / ZB        — serial: pipeline_step_time adds it back
+    #                              into the augmented bwd_dx for these
+    #                              composers (bit-exact with the legacy
+    #                              ``t_bwd_dx += recompute_t`` location).
+    #   - DualPipe / DualPipeV   — dual-stream: the residual after the
+    #                              bwd_dw window absorbs it is exposed.
+    #
+    # t_recompute is still scaled through the same EP-imbalance step as
+    # the rest of bwd so the per-stage report remains consistent with the
+    # bwd that ultimately carries it.
     recompute_t = _recompute_time(stage_ops, model, system, strategy, gpu_name)
-    t_bwd_dx += recompute_t
     t_recompute = recompute_t
 
     t_comm_fwd = 0.0

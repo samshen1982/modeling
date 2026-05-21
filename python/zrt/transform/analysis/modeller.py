@@ -52,6 +52,13 @@ def estimate_training_from_graphs(
     moe_active_experts: int = 1,
     model_id: str = "",
     fusion_config: "FusionConfig | None" = None,
+    ffn_hidden: int | None = None,
+    moe_ffn_hidden: int | None = None,
+    layer_type_counts: dict[str, int] | None = None,
+    n_shared_experts: int | None = None,
+    num_heads: int | None = None,
+    kv_heads: int | None = None,
+    head_dim: int | None = None,
 ) -> "TrainingReport | tuple[TrainingReport, TransformContext, dict[str, OpGraph]]":
     """Estimate training performance from pre-built OpGraph instances.
 

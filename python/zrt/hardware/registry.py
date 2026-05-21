@@ -22,6 +22,7 @@ from python.zrt.hardware.spec import (
     LinkSpec,
     MemorySpec,
     MemoryTier,
+    TopologyTier,
 )
 
 _CONFIGS_DIR = Path(__file__).parent / "configs"
@@ -142,6 +143,39 @@ def _parse_memory(m: dict[str, Any]) -> MemorySpec:
 
 
 def _parse_interconnect(ic: dict[str, Any]) -> InterconnectSpec:
+    """Parse interconnect spec from YAML.
+
+    Two formats are supported:
+
+    1. **Legacy 2-tier** (all existing hardware YAMLs use this)::
+
+         interconnect:
+           intra_node: {type: ..., bandwidth_gbps: ..., num_devices: 8, ...}
+           inter_node: {type: ..., bandwidth_gbps: ..., ...}
+
+    2. **N-tier list** (innermost → outermost; ``num_devices: 0`` for the
+       unbounded outermost tier)::
+
+         interconnect:
+           tiers:
+             - {name: "nvlink",       type: ..., num_devices: 8,  ...}
+             - {name: "nvswitch_rack", type: ..., num_devices: 72, ...}
+             - {name: "ib_rail",      type: ..., num_devices: 576, ...}
+             - {name: "ib_spine",     type: ..., num_devices: 0,  oversubscription: 4.0}
+
+    When both are present the explicit ``tiers`` list wins (this is the
+    forward-compatible form). Mixing them is not supported.
+    """
+    tiers_raw = ic.get("tiers")
+    if tiers_raw:
+        tiers: list[TopologyTier] = []
+        for i, t in enumerate(tiers_raw):
+            name = t.get("name") or f"tier_{i}"
+            # `name` is metadata only; LinkSpec gets the connectivity fields.
+            link_dict = {k: v for k, v in t.items() if k != "name"}
+            tiers.append(TopologyTier(name=name, link=_parse_link(link_dict)))
+        return InterconnectSpec(tiers=tiers)
+
     return InterconnectSpec(
         intra_node=_parse_link(ic.get("intra_node", {})),
         inter_node=_parse_link(ic.get("inter_node", {})),

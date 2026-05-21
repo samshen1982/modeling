@@ -160,9 +160,130 @@ class LinkSpec:
 
 
 @dataclass
+class TopologyTier:
+    """One level of the interconnect hierarchy.
+
+    Tiers are ordered innermost → outermost. The innermost tier is the
+    smallest, fastest scale-up domain (NVLink island / HCCS super-node);
+    the outermost tier is the largest, slowest scale-out fabric (IB
+    spine), typically with ``link.num_devices == 0`` to mark "unbounded".
+
+    ``link.num_devices`` semantics: number of GPUs in **one instance** of
+    this tier (so 8 for a per-node NVLink island, 72 for an NVL72 rack,
+    0 for the outermost unbounded fabric). Cumulative coverage grows
+    monotonically from innermost to outermost.
+    """
+    name: str
+    link: LinkSpec
+
+
 class InterconnectSpec:
-    intra_node: LinkSpec
-    inter_node: LinkSpec
+    """N-tier interconnect description (innermost → outermost).
+
+    Two construction modes — kept compatible so existing YAMLs and test
+    fixtures continue to work:
+
+    1. **New**: ``InterconnectSpec(tiers=[t0, t1, t2, ...])`` for N ≥ 1
+       tiers, ordered innermost to outermost.
+    2. **Legacy**: ``InterconnectSpec(intra_node=L, inter_node=L2)`` —
+       equivalent to ``tiers=[TopologyTier("intra_node", L),
+                              TopologyTier("inter_node", L2)]``.
+
+    The ``intra_node`` / ``inter_node`` *properties* always read
+    ``tiers[0]`` / ``tiers[-1]`` respectively, so call sites that read
+    by either name keep working regardless of how the object was built.
+    """
+
+    __slots__ = ("tiers",)
+
+    def __init__(
+        self,
+        tiers: list[TopologyTier] | None = None,
+        *,
+        intra_node: LinkSpec | None = None,
+        inter_node: LinkSpec | None = None,
+    ) -> None:
+        if tiers is not None and (intra_node is not None or inter_node is not None):
+            raise ValueError(
+                "InterconnectSpec: pass either `tiers` or "
+                "`intra_node`/`inter_node`, not both"
+            )
+        if tiers is not None:
+            self.tiers: list[TopologyTier] = list(tiers)
+        else:
+            tlist: list[TopologyTier] = []
+            if intra_node is not None:
+                tlist.append(TopologyTier(name="intra_node", link=intra_node))
+            if inter_node is not None:
+                tlist.append(TopologyTier(name="inter_node", link=inter_node))
+            self.tiers = tlist
+        self._validate_tiers()
+
+    def _validate_tiers(self) -> None:
+        """Validate tier ordering invariants shared by direct/YAML construction."""
+        last_idx = len(self.tiers) - 1
+        for i, tier in enumerate(self.tiers):
+            if tier.link.num_devices == 0 and i != last_idx:
+                raise ValueError(
+                    "InterconnectSpec: only outermost tier may be unbounded "
+                    f"(num_devices=0); got tier {i} {tier.name!r}"
+                )
+
+    # ── Back-compat accessors ─────────────────────────────────────────
+    @property
+    def intra_node(self) -> LinkSpec:
+        if not self.tiers:
+            raise ValueError("InterconnectSpec has no tiers configured")
+        return self.tiers[0].link
+
+    @property
+    def inter_node(self) -> LinkSpec:
+        if not self.tiers:
+            raise ValueError("InterconnectSpec has no tiers configured")
+        return self.tiers[-1].link
+
+    # ── N-tier helpers ────────────────────────────────────────────────
+    def innermost_tier_for(self, group_size: int) -> TopologyTier:
+        """Smallest tier whose per-instance domain still contains the group.
+
+        Iterates tiers innermost → outermost; returns the first tier
+        whose ``link.num_devices`` is ≥ ``group_size`` (or the outermost
+        tier, treated as unbounded, when none fit).
+
+        A tier with ``link.num_devices == 0`` is treated as unbounded
+        and matches any group size — appropriate for the outermost IB
+        spine where the domain is the whole cluster.
+        """
+        if not self.tiers:
+            raise ValueError("InterconnectSpec has no tiers configured")
+        for tier in self.tiers:
+            n = tier.link.num_devices
+            if n == 0 or group_size <= n:
+                return tier
+        return self.tiers[-1]
+
+    def __repr__(self) -> str:
+        return f"InterconnectSpec(tiers={self.tiers!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, InterconnectSpec):
+            return NotImplemented
+        return self.tiers == other.tiers
+
+    def __hash__(self) -> int:  # type: ignore[override]
+        return hash(tuple(
+            (
+                t.name,
+                t.link.type,
+                t.link.bandwidth_gbps,
+                t.link.latency_us,
+                t.link.topology,
+                t.link.num_devices,
+                t.link.kb_efficiency,
+                t.link.oversubscription,
+            )
+            for t in self.tiers
+        ))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

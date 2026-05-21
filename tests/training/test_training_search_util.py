@@ -1,6 +1,10 @@
 """Tests for training search utility."""
 from __future__ import annotations
 
+import shutil
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from zrt.training.search.training_search_util import (
@@ -9,8 +13,11 @@ from zrt.training.search.training_search_util import (
     _make_strategy_from_config,
     _make_system_from_config,
     _passes_pod_packing,
+    export_best_configs_excel,
     format_results,
+    run_training_search_parallel,
     run_training_task_wrapper,
+    save_results,
 )
 from zrt.training.spec.report import TrainingReport
 from zrt.training.spec.model import LayerKind, ModelSpec
@@ -578,6 +585,36 @@ class TestFormatResults:
         assert df.iloc[0]["dp_total_ms"] == 9.0
         assert df.iloc[0]["dp_exposed_ms"] == 6.0
 
+    def test_format_results_includes_comm_domain_columns(self):
+        report = TrainingReport(step_time_ms=100.0, mfu=0.45)
+        config = {
+            "model": "test",
+            "hw": "nvidia_gb300_nvl576",
+            "world_size": 128,
+            "tp": 4,
+            "cp": 2,
+            "pp": 2,
+            "ep": 2,
+            "dp": 8,
+        }
+
+        df = format_results([report], [config])
+        row = df.iloc[0]
+
+        for col in [
+            "ep_comm_domain",
+            "pp_comm_domain",
+            "dp_comm_domain",
+            "tp_comm_domain",
+            "cp_comm_domain",
+        ]:
+            assert col in df.columns
+            assert "size=" in row[col]
+            assert "tier=" in row[col]
+
+        assert "size=4" in row["tp_comm_domain"]
+        assert "size=8" in row["dp_comm_domain"]
+
     def test_format_results_includes_memory_and_filters_over_hbm_budget(self):
         reports = [
             TrainingReport(
@@ -610,6 +647,145 @@ class TestFormatResults:
         assert row["activations_gb"] == 2.0
         assert row["comm_buffers_gb"] == 0.12
         assert row["memory_gb"] == 4.12
+
+
+class TestSearchOutputs:
+    """Test search output helper behavior."""
+
+    def test_save_results_writes_summary_csv_and_prints_top_rows(self, capsys):
+        output_dir = Path("output") / "test_search_outputs_save"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        df = format_results(
+            [TrainingReport(step_time_ms=10.0, mfu=0.4)],
+            [{"model": "deepseek_v3_2", "world_size": 8}],
+        )
+
+        try:
+            save_results(df, str(output_dir))
+
+            csv_path = output_dir / "results_summary.csv"
+            assert csv_path.exists()
+            assert "deepseek_v3_2" in csv_path.read_text(encoding="utf-8")
+            out = capsys.readouterr().out
+            assert "Training Search Results" in out
+            assert "Total results: 1 configs" in out
+        finally:
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+
+    def test_export_best_configs_excel_ignores_empty_results(self):
+        output_dir = Path("output") / "test_search_outputs_empty"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+
+        export_best_configs_excel([], str(output_dir))
+
+        assert not output_dir.exists()
+
+    def test_export_best_configs_excel_exports_best_row_per_group(self, monkeypatch):
+        import zrt.training.io.excel_exporter as excel_exporter
+        import zrt.training.ir.builders as builders
+        import zrt.training.models.flops as flops
+
+        output_dir = Path("output") / "test_search_outputs_best"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        exported = []
+
+        monkeypatch.setattr(
+            builders,
+            "build_graph",
+            lambda model, strategy: SimpleNamespace(ops=[SimpleNamespace(name="fake_op")]),
+        )
+        monkeypatch.setattr(flops, "op_cost", lambda op, model, system: 1.0)
+
+        def fake_export_estimate_excel(**kwargs):
+            exported.append(kwargs)
+            Path(kwargs["output_path"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(kwargs["output_path"]).write_text("excel", encoding="utf-8")
+
+        monkeypatch.setattr(excel_exporter, "export_estimate_excel", fake_export_estimate_excel)
+
+        try:
+            export_best_configs_excel(
+                [
+                    {
+                        "model_name": "deepseek_v3_2",
+                        "hw_name": "nvidia_h100_sxm",
+                        "config": {
+                            "seq_len": 4096,
+                            "world_size": 8,
+                            "tp": 1,
+                            "cp": 1,
+                            "pp": 1,
+                            "ep": 1,
+                            "dp": 8,
+                        },
+                        "report": TrainingReport(mfu=0.2),
+                    },
+                    {
+                        "model_name": "deepseek_v3_2",
+                        "hw_name": "nvidia_h100_sxm",
+                        "config": {
+                            "seq_len": 4096,
+                            "world_size": 8,
+                            "tp": 2,
+                            "cp": 1,
+                            "pp": 1,
+                            "ep": 1,
+                            "dp": 4,
+                        },
+                        "report": TrainingReport(mfu=0.6),
+                    },
+                ],
+                str(output_dir),
+            )
+
+            assert len(exported) == 1
+            assert exported[0]["strategy"].tp == 2
+            assert exported[0]["system"].world_size == 8
+            assert exported[0]["op_costs"] == {"fake_op": 1.0}
+            assert (output_dir / "deepseek_v3_2_nvidia_h100_sxm_4096_best.xlsx").exists()
+        finally:
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
+
+    def test_run_training_search_parallel_returns_empty_when_no_configs(self, monkeypatch):
+        import zrt.training.search.training_search_util as search_util
+
+        class FakeExecutor:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        monkeypatch.setattr(search_util, "ProcessPoolExecutor", FakeExecutor)
+        monkeypatch.setattr(TrainingConfigManager, "count_total_configs", lambda self: 0)
+        monkeypatch.setattr(
+            TrainingConfigManager,
+            "generate_static_configs_stream",
+            lambda self: iter(()),
+        )
+
+        output_dir = Path("output") / "training_search" / "coverage_noop_ws_1"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+
+        try:
+            df = run_training_search_parallel(
+                {"model": ["coverage_noop"], "world_size": [1]},
+                workers=1,
+            )
+
+            assert df.empty
+        finally:
+            if output_dir.exists():
+                shutil.rmtree(output_dir)
 
 
 if __name__ == "__main__":

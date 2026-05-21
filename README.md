@@ -137,12 +137,13 @@ python -m python.zrt --model v3.2
 - `output/<model_slug>/reports/<slug>_<phase>_report.html` — HTML 报告
 - `output/<model_slug>/reports/<slug>_<phase>_trace.json` — Chrome Trace（可在 `chrome://tracing` 中加载）
 
-`--estimate-config` 默认输出 Excel 到 `output/estimate/<config名>_<时间戳>.xlsx`，包含 5 个 sheet：
+`--estimate-config` 默认输出 Excel 到 `output/estimate/<config名>_<时间戳>.xlsx`，包含 6 个 sheet：
 - **Summary** — Step time, MFU, HFU, FLOPs, Memory (per GPU), Pipeline schedule；Step Time Breakdown 含独立的 **Recompute (act. redo)** 行，Pipeline 段含 **Bubble Time (ms)**（HTML 报告顶部亦有 Bubble / Recompute 指标卡）
 - **Ops** — 每个算子的 name, kind, layer, FLOPs, bytes, bound, latency (μs)
 - **Model** — 完整模型参数（几何、MoE、HC、MLA、压缩比、dtype 等）
 - **Hardware** — GPU 算力/HBM/网络 tier
 - **Strategy** — 并行配置、batch、schedule、recompute、offload
+- **Comm Domains** — 按 EP / PP / DP / TP / CP 展示通信域 group size、tier 和 rank sample
 
 ### Python API
 

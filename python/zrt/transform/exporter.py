@@ -1116,6 +1116,18 @@ def export_transformed_graph(graph: OpGraph, ctx: TransformContext,
 
 def _export_json(graph: OpGraph, ctx: TransformContext, output_path: Path) -> None:
     """Export transformed graph to JSON format."""
+    # Serialize metadata (convert dataclass objects to dict)
+    metadata_serialized = {}
+    for k, v in graph.metadata.items():
+        if hasattr(v, 'to_dict'):
+            metadata_serialized[k] = v.to_dict()
+        elif hasattr(v, '__dataclass_fields__'):
+            # Generic dataclass serialization
+            import dataclasses
+            metadata_serialized[k] = dataclasses.asdict(v)
+        else:
+            metadata_serialized[k] = v
+    
     data = {
         "graph": {
             "name": graph.name,
@@ -1123,6 +1135,7 @@ def _export_json(graph: OpGraph, ctx: TransformContext, output_path: Path) -> No
             "num_nodes": len(graph.nodes),
             "num_edges": len(graph.edges),
         },
+        "metadata": metadata_serialized,
         "parallelism": {
             "strategy": ctx.parallel.describe(),
             "tp": ctx.parallel.tp,
@@ -1219,6 +1232,7 @@ class TrainingGraphExcelWriter(TransformedGraphExcelWriter):
 
         if bwd_graph is not None:
             self._write_backward_ops_sheet(wb, bwd_graph, ctx)
+            self._write_optimizer_sheet(wb, bwd_graph, ctx)
             self._write_recompute_sheet(wb, bwd_graph)
         if training_summary is not None:
             self._write_training_summary_sheet(wb, training_summary)
@@ -1369,6 +1383,176 @@ class TrainingGraphExcelWriter(TransformedGraphExcelWriter):
         ws.cell(row=footer_row, column=6, value=round(total_lat, 3))
         for col in range(1, 9):
             ws.cell(row=footer_row, column=col).font = Font(bold=True)
+
+        ws.freeze_panes = "A2"
+
+    def _write_optimizer_sheet(
+        self, wb: openpyxl.Workbook, graph: OpGraph, ctx: TransformContext
+    ) -> None:
+        """Write optimizer nodes (muon_ag, optimizer_step, muon_rs) with detailed breakdown."""
+        opt_nodes = [
+            n for n in graph.nodes.values()
+            if n.id in ("muon_ag", "optimizer_step", "muon_rs")
+            or "optimizer" in n.id
+        ]
+
+        if not opt_nodes:
+            return
+
+        ws = wb.create_sheet("Optimizer Ops")
+        logger.info(f"Created Optimizer Ops sheet with {len(opt_nodes)} nodes")
+
+        columns = [
+            ("Node ID", 16),
+            ("Op Type", 22),
+            ("Category", 14),
+            ("Stage ID", 10),
+            ("", 0),
+            ("=== Attributes ===", 0),
+            ("Optimizer", 12),
+            ("Params Total", 14),
+            ("Params Muon", 14),
+            ("Params Adam", 14),
+            ("NS Steps", 10),
+            ("NS Rotation", 12),
+            ("", 0),
+            ("=== Memory ===", 0),
+            ("State Bytes (B)", 16),
+            ("State Bytes (GB)", 16),
+            ("AG Bytes (B)", 14),
+            ("AG Bytes (GB)", 14),
+            ("Comm Volume (B)", 16),
+            ("Comm Volume (GB)", 16),
+            ("", 0),
+            ("=== FLOPs ===", 0),
+            ("Step FLOPs", 18),
+            ("Step FLOPs (TF)", 16),
+            ("", 0),
+            ("=== Timing ===", 0),
+            ("Group Size", 12),
+            ("Compute Time (us)", 18),
+            ("Compute Time (ms)", 18),
+            ("Comm Time (us)", 16),
+            ("Comm Time (ms)", 16),
+            ("Total Time (ms)", 16),
+            ("% of Step", 12),
+            ("", 0),
+            ("=== Overlap ===", 0),
+            ("Overlap Type", 14),
+            ("Overlap Target", 20),
+            ("Exposed Time (us)", 16),
+            ("Hidden Time (us)", 16),
+        ]
+        self._write_header(ws, columns)
+
+        _opt_fill = PatternFill(start_color="e3f2fd", end_color="e3f2fd", fill_type="solid")
+        _comm_fill = PatternFill(start_color="fff3e0", end_color="fff3e0", fill_type="solid")
+
+        step_time_ms = 0.0
+        pm = graph.metadata.get("pipeline_metrics")
+        if pm:
+            if hasattr(pm, "step_time_ms"):
+                val = pm.step_time_ms
+                step_time_ms = float(val) if val else 0.0
+            elif isinstance(pm, dict):
+                step_time_ms = float(pm.get("step_time_ms", 0.0))
+
+        hw = getattr(ctx, 'hw_spec', None)
+
+        for row_idx, node in enumerate(opt_nodes, 2):
+            attrs = node.attrs
+            is_comm = node.category == "communication"
+            fill = _comm_fill if is_comm else _opt_fill
+
+            state_bytes = float(attrs.get("state_bytes", 0) or 0)
+            ag_bytes = float(attrs.get("muon_ag_bytes", 0) or attrs.get("bytes", 0) or 0)
+            comm_bytes = float(attrs.get("bytes", 0) or 0)
+            step_flops = float(attrs.get("step_flops", 0) or 0)
+            group_size = int(attrs.get("group_size", 0) or 0)
+
+            # Read timing from annotations (set by TrainingPipelinePass)
+            latency_us = float(node.annotations.get("latency_us", 0) or 0)
+            compute_us = float(node.annotations.get("compute_us", 0) or 0)
+            comm_time_us = float(node.annotations.get("comm_time_us", 0) or 0)
+            
+            # Fallback: compute from attrs if annotations not set
+            if compute_us == 0 and hw and node.id == "optimizer_step" and step_flops > 0:
+                from python.zrt.ir.types import DType
+                peak_flops = hw.peak_flops(DType.BF16)
+                compute_us = (step_flops / peak_flops) * 1e6 if peak_flops > 0 else 0.0
+            
+            # For comm nodes, use latency as comm_time
+            if is_comm and latency_us > 0:
+                comm_time_us = latency_us
+
+            compute_ms = compute_us / 1000 if compute_us else 0.0
+            comm_ms = comm_time_us / 1000 if comm_time_us else 0.0
+            total_ms = compute_ms + comm_ms
+            pct_of_step = (total_ms / step_time_ms * 100) if step_time_ms > 0 else 0.0
+
+            # Overlap info from annotations
+            overlap_type = node.annotations.get("overlap_type", "none")
+            overlap_target = node.annotations.get("overlap_target", "")
+            overlap_exposed_ann = node.annotations.get("overlap_exposed_us")
+            overlap_hidden_ann = node.annotations.get("overlap_hidden_us")
+
+            # Priority: use annotation values if set, else calculate
+            if overlap_exposed_ann is not None:
+                exposed_us = float(overlap_exposed_ann)
+            else:
+                exposed_us = latency_us
+
+            if overlap_hidden_ann is not None:
+                hidden_us = float(overlap_hidden_ann)
+            elif overlap_type == "moonshot_ag":
+                hidden_us = latency_us - exposed_us
+            elif overlap_type == "moonshot_rs":
+                hidden_us = latency_us - exposed_us
+            else:
+                hidden_us = 0.0
+
+            values = [
+                node.id,
+                node.op_type,
+                node.category,
+                node.annotations.get("stage_id", ""),
+                "",
+                "",
+                attrs.get("optimizer", ""),
+                attrs.get("params_total", ""),
+                attrs.get("params_muon", ""),
+                attrs.get("params_adam", ""),
+                attrs.get("ns_steps", ""),
+                "Yes" if attrs.get("ns_rotation", False) else "No",
+                "",
+                "",
+                state_bytes,
+                round(state_bytes / 1e9, 3) if state_bytes else "",
+                ag_bytes,
+                round(ag_bytes / 1e9, 3) if ag_bytes else "",
+                comm_bytes,
+                round(comm_bytes / 1e9, 3) if comm_bytes else "",
+                "",
+                "",
+                step_flops,
+                round(step_flops / 1e12, 3) if step_flops else "",
+                "",
+                "",
+                group_size,
+                round(compute_us, 3) if compute_us else "",
+                round(compute_ms, 3) if compute_ms else "",
+                round(comm_time_us, 3) if comm_time_us else "",
+                round(comm_ms, 3) if comm_ms else "",
+                round(total_ms, 3),
+                f"{pct_of_step:.1f}%" if pct_of_step else "",
+                "",
+                "",
+                overlap_type if overlap_type else "none",
+                overlap_target if overlap_target else "",
+                round(exposed_us, 3) if exposed_us is not None else "",
+                round(hidden_us, 3) if hidden_us is not None else "",
+            ]
+            self._write_row(ws, row_idx, values, fill)
 
         ws.freeze_panes = "A2"
 

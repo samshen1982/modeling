@@ -18,7 +18,12 @@ Public API::
     # groups.tp_groups[i] → list of ranks in TP group i
     # groups.group_tier["TP"].primary → tier index this group rides on
 """
-from zrt.training.topology.comm_domain import CommDomain, build_comm_domain
+from zrt.training.topology.comm_domain import (
+    CommDomain,
+    build_comm_domain,
+    comm_domain_report,
+    format_comm_domain_entry,
+)
 from zrt.training.topology.process_groups import (
     DEFAULT_PARALLEL_ORDER,
     GroupTierAssignment,
@@ -29,6 +34,8 @@ from zrt.training.topology.process_groups import (
 __all__ = [
     "CommDomain",
     "build_comm_domain",
+    "comm_domain_report",
+    "format_comm_domain_entry",
     "GroupTierAssignment",
     "ParallelGroups",
     "build_process_groups",

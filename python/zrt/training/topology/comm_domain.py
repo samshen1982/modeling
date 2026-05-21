@@ -49,6 +49,7 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 _VALID_KINDS = ("TP", "CP", "EP", "DP", "PP", "EXPERT_DP")
+_REPORT_KINDS = ("EP", "PP", "DP", "TP", "CP")
 
 
 @dataclass
@@ -144,6 +145,8 @@ class CommDomain:
         picked by :func:`zrt.training.topology._tier_for_groups`.
         """
         kind = kind.upper()
+        if not self.system.interconnect.tiers:
+            raise ValueError("interconnect has no tiers configured")
         if kind in self.groups.tier:
             return self.groups.tier[kind].primary_tier
         # Fall back to a 2-tier heuristic identical to the legacy
@@ -276,3 +279,45 @@ def build_comm_domain(system: SystemSpec, strategy: Strategy) -> CommDomain:
     minimize churn at call sites.
     """
     return CommDomain(system=system, strategy=strategy)
+
+
+def _format_rank_sample(ranks: list[int], limit: int = 8) -> str:
+    if not ranks:
+        return "[]"
+    head = ", ".join(str(r) for r in ranks[:limit])
+    if len(ranks) > limit:
+        head += f", ... (+{len(ranks) - limit})"
+    return f"[{head}]"
+
+
+def comm_domain_report(
+    system: SystemSpec,
+    strategy: Strategy,
+    kinds: tuple[str, ...] = _REPORT_KINDS,
+) -> dict[str, dict[str, object]]:
+    """Return display-ready communication-domain metadata by parallel axis."""
+    domain = CommDomain(system=system, strategy=strategy)
+    out: dict[str, dict[str, object]] = {}
+    for kind in kinds:
+        kind = kind.upper()
+        size = domain.group_size(kind)
+        tier_idx = domain.tier(kind)
+        tier_name = system.interconnect.tiers[tier_idx].name
+        ranks = domain.ranks(kind)
+        out[kind] = {
+            "group_size": size,
+            "tier_idx": tier_idx,
+            "tier_name": tier_name,
+            "tier": f"{tier_idx}:{tier_name}",
+            "rank_sample": _format_rank_sample(ranks),
+        }
+    return out
+
+
+def format_comm_domain_entry(entry: dict[str, object]) -> str:
+    """Compact single-cell representation for search result tables."""
+    return (
+        f"size={entry['group_size']}; "
+        f"tier={entry['tier']}; "
+        f"ranks={entry['rank_sample']}"
+    )

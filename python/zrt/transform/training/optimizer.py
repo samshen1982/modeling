@@ -5,6 +5,7 @@ import math
 from python.zrt.ir.graph import OpGraph
 from python.zrt.ir.node import OpNode
 from python.zrt.ir.edge import Edge
+from python.zrt.ir.types import TensorMeta, DType
 from python.zrt.ir.param_count import count_params
 from python.zrt.transform.base import GraphPass
 from python.zrt.transform.context import TransformContext
@@ -48,8 +49,9 @@ class OptimizerPass(GraphPass):
         # Check graph-level phase (for unified stitched graphs)
         graph_phase = g.metadata.get("phase", "")
 
-        # For stitched graphs, only add optimizer to backward
-        if graph_phase and graph_phase not in ("train_backward", "backward"):
+        # For stitched graphs (phase="train"), optimizer runs on the unified graph
+        # For separate backward graphs (phase="train_backward" or "backward"), optimizer runs on backward
+        if graph_phase and graph_phase not in ("train", "train_backward", "backward"):
             return g
 
         # For non-stitched graphs, check if any node is a backward node
@@ -197,8 +199,55 @@ class OptimizerPass(GraphPass):
         step_node.annotations["stage_id"] = optimizer_stage_id
         step_node.annotations["optimizer_step"] = True
 
-        # Append the optimizer step node at the end of the graph
-        self._append_at_end(g, step_node)
+        # Build optimizer chain: [AG] -> optimizer_step -> [RS]
+        # AG: AllGather momentum before optimizer step (Muon + ZeRO-1 + DP>1)
+        # RS: ReduceScatter gradient after optimizer step (rotation=True)
+        optimizer_chain: list[OpNode] = []
+
+        if opt == "muon" and dp > 1 and muon_ag_bytes > 0:
+            ag_node = OpNode(
+                id="muon_ag",
+                op_type="comm.all_gather",
+                inputs=[],
+                outputs=[],
+                attrs={
+                    "bytes": muon_ag_bytes,
+                    "group_size": dp,
+                    "collective": "all_gather",
+                    "optimizer": "muon",
+                },
+                scope="optimizer.comm",
+                category="communication",
+            )
+            ag_node.annotations["phase"] = "bwd"
+            ag_node.annotations["stage_id"] = optimizer_stage_id
+            ag_node.annotations["muon_comm"] = "ag"
+            optimizer_chain.append(ag_node)
+
+        optimizer_chain.append(step_node)
+
+        if opt == "muon" and dp > 1 and muon_ag_bytes > 0 and muon_rotation:
+            rs_node = OpNode(
+                id="muon_rs",
+                op_type="comm.reduce_scatter",
+                inputs=[],
+                outputs=[],
+                attrs={
+                    "bytes": muon_ag_bytes,
+                    "group_size": dp,
+                    "collective": "reduce_scatter",
+                    "optimizer": "muon",
+                },
+                scope="optimizer.comm",
+                category="communication",
+            )
+            rs_node.annotations["phase"] = "bwd"
+            rs_node.annotations["stage_id"] = optimizer_stage_id
+            rs_node.annotations["muon_comm"] = "rs"
+            optimizer_chain.append(rs_node)
+
+        # Append the optimizer chain at the end of the graph
+        self._append_chain_at_end(g, optimizer_chain)
 
         return g
 
@@ -260,6 +309,22 @@ class OptimizerPass(GraphPass):
             graph: OpGraph to modify
             new_node: OpNode to append
         """
+        self._append_chain_at_end(graph, [new_node])
+
+    def _append_chain_at_end(self, graph: OpGraph, chain: list[OpNode]) -> None:
+        """Append a chain of nodes at the end of the graph.
+
+        Finds all sink nodes (no outgoing edges) and connects them
+        to the first node in the chain, then connects chain nodes
+        sequentially.
+
+        Args:
+            graph: OpGraph to modify
+            chain: List of OpNodes to append in order
+        """
+        if not chain:
+            return
+
         # Build adjacency to find sink nodes
         has_out_edge = set()
         for edge in graph.edges:
@@ -270,23 +335,42 @@ class OptimizerPass(GraphPass):
             if nid not in has_out_edge
         ]
 
-        # Add the new node first
-        graph.nodes[new_node.id] = new_node
-        if new_node.id not in graph._pred:
-            graph._pred[new_node.id] = []
-        if new_node.id not in graph._succ:
-            graph._succ[new_node.id] = []
+        # Add all chain nodes to the graph
+        for node in chain:
+            graph.nodes[node.id] = node
+            if node.id not in graph._pred:
+                graph._pred[node.id] = []
+            if node.id not in graph._succ:
+                graph._succ[node.id] = []
 
-        # Connect all sink nodes to the new node
+        # Connect all sink nodes to the first chain node
+        first_node = chain[0]
         for sink_node in sink_nodes:
             if sink_node.outputs:
                 graph.edges.append(Edge(
                     src=sink_node.id,
                     src_idx=0,
-                    dst=new_node.id,
+                    dst=first_node.id,
                     dst_idx=0,
                     tensor=sink_node.outputs[0],
                 ))
-                # Update adjacency structures
-                graph._succ[sink_node.id].append(new_node.id)
-                graph._pred[new_node.id].append(sink_node.id)
+                graph._succ[sink_node.id].append(first_node.id)
+                graph._pred[first_node.id].append(sink_node.id)
+
+        # Connect chain nodes sequentially
+        for i in range(len(chain) - 1):
+            src_node = chain[i]
+            dst_node = chain[i + 1]
+            graph.edges.append(Edge(
+                src=src_node.id,
+                src_idx=0,
+                dst=dst_node.id,
+                dst_idx=0,
+                tensor=TensorMeta.from_shape_dtype(
+                    f"opt_chain_{i}",
+                    shape=(1,),
+                    dtype=DType.BF16,
+                ),
+            ))
+            graph._succ[src_node.id].append(dst_node.id)
+            graph._pred[dst_node.id].append(src_node.id)

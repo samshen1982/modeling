@@ -281,12 +281,13 @@ class TestZeroBubbleFloor:
             f"ZB cooldown collapsed to zero; got cooldown={r.cooldown}"
 
     def test_unbalanced_tw_uses_natural_value(self):
-        """When t_stage > t_w, the natural formula dominates and the floor is
+        """When bwd_dx > t_w, the natural formula dominates and the floor is
         not applied (floor < natural)."""
-        stages = [StageTime(fwd=4.0, bwd=6.0, bwd_dx=4.0, bwd_dw=2.0),
-                  StageTime(fwd=4.0, bwd=6.0, bwd_dx=4.0, bwd_dw=2.0)]
+        stages = [StageTime(fwd=4.0, bwd=6.0, bwd_dx=5.0, bwd_dw=2.0),
+                  StageTime(fwd=4.0, bwd=6.0, bwd_dx=5.0, bwd_dw=2.0)]
         s = Strategy(tp=1, pp=2, dp=4, micro_batch=1, global_batch=4,
                      pp_schedule=PPSched.ZERO_BUBBLE)
         r = ZeroBubbleComposer().compose(stages, M=4, pp=2, dp_ar_time=0.0, strategy=s)
-        # Natural: bubble = (pp-1)*(F + B_dx - 2*W) = 1*(4+4-4) = 4; cooldown=2
-        assert r.cooldown == pytest.approx(2.0)
+        # New formula: cooldown = (pp-1) * max(bwd_dx - t_w, floor)
+        #   = 1 * max(5.0 - 2.0, floor) = 3.0
+        assert r.cooldown == pytest.approx(3.0)

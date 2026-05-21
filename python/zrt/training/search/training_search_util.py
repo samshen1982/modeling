@@ -36,6 +36,7 @@ from zrt.training.spec.strategy import (
     TPOverlap,
 )
 from zrt.training.spec.system import GPU, SystemSpec
+from zrt.training.topology import comm_domain_report, format_comm_domain_entry
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ _WORKER_HW_CACHE: Dict[Tuple[str, int], SystemSpec] = {}
 
 _MODELS_DIR = Path(__file__).parent.parent / "configs" / "models"
 _DEFAULT_POD_PACKING_AXES = ("tp", "cp")
+_COMM_DOMAIN_AXES = ("ep", "pp", "dp", "tp", "cp")
 
 
 def _ceil_nodes_for_world_size(world_size: int, gpus_per_node: int) -> int:
@@ -89,6 +91,7 @@ def _system_from_hw(
     gpus_per_node: int,
     world_size_override: int | None,
     host_mem_gb: float,
+    warn_partial: bool = True,
 ) -> SystemSpec:
     system = SystemSpec(
         gpu=GPU(
@@ -110,7 +113,8 @@ def _system_from_hw(
         world_size_override=world_size_override,
         host_mem_gb=host_mem_gb,
     )
-    _warn_if_partial_allocation(system)
+    if warn_partial:
+        _warn_if_partial_allocation(system)
     return system
 
 
@@ -203,7 +207,7 @@ def _load_model_spec(model_name: str, quant_preset: Optional[str] = None) -> Mod
     return _parse_model(d)
 
 
-def _make_system_from_config(config: Dict) -> SystemSpec:
+def _make_system_from_config(config: Dict, *, warn_partial: bool = True) -> SystemSpec:
     _reject_gpus_per_node_config(config)
     hw_name = config.get("hw", "nvidia_h100_sxm")
     hw = load_hw(hw_name)
@@ -222,6 +226,7 @@ def _make_system_from_config(config: Dict) -> SystemSpec:
         gpus_per_node=gpus_per_node,
         world_size_override=world_size_override,
         host_mem_gb=config.get("host_mem_gb", 256.0),
+        warn_partial=warn_partial,
     )
 
 
@@ -266,6 +271,29 @@ def _make_strategy_from_config(config: Dict) -> Strategy:
         dp_overlap_in_bubble=config.get("dp_overlap_in_bubble", True),
         dp_grad_buckets=config.get("dp_grad_buckets", 25),
     )
+
+
+def _empty_comm_domain_columns() -> dict[str, str]:
+    return {f"{axis}_comm_domain": "" for axis in _COMM_DOMAIN_AXES}
+
+
+def _comm_domain_columns_from_config(config: Dict[str, Any]) -> dict[str, str]:
+    try:
+        system = _make_system_from_config(config, warn_partial=False)
+        strategy = _make_strategy_from_config(config)
+        report = comm_domain_report(
+            system,
+            strategy,
+            kinds=tuple(axis.upper() for axis in _COMM_DOMAIN_AXES),
+        )
+    except Exception as exc:
+        logger.debug("Unable to derive communication-domain columns: %s", exc)
+        return _empty_comm_domain_columns()
+
+    return {
+        f"{axis}_comm_domain": format_comm_domain_entry(report[axis.upper()])
+        for axis in _COMM_DOMAIN_AXES
+    }
 
 
 @dataclass
@@ -697,6 +725,8 @@ def format_results(reports: List[TrainingReport], configs: List[Dict]) -> pd.Dat
         else:
             memory_gb = None
 
+        d.update(_comm_domain_columns_from_config(cfg))
+        d["compute_time_ms"] = round(report.compute_time_ms, 2)
         d["fwd_compute_ms"] = round(report.fwd_compute_ms, 2)
         d["bwd_compute_ms"] = round(report.bwd_compute_ms, 2)
         d["exposed_comm_ms"] = round(report.exposed_comm_ms, 2)
@@ -739,7 +769,7 @@ def format_results(reports: List[TrainingReport], configs: List[Dict]) -> pd.Dat
     if not df.empty:
         df = df.sort_values("mfu", ascending=False)
 
-    metric_cols = ["fwd_compute_ms", "bwd_compute_ms", "exposed_comm_ms",
+    metric_cols = ["compute_time_ms", "fwd_compute_ms", "bwd_compute_ms", "exposed_comm_ms",
                    "tp_total_ms", "tp_exposed_ms", "cp_total_ms", "cp_exposed_ms",
                    "ep_total_ms", "ep_exposed_ms", "pp_total_ms", "pp_exposed_ms",
                    "dp_total_ms", "dp_exposed_ms",

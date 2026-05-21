@@ -95,28 +95,13 @@ def estimate_training_from_graphs(
         metadata["total_params"] = int(total_params)
     if model_type is not None:
         metadata["model_type"] = model_type
-    if ffn_hidden is not None:
-        metadata["ffn_hidden"] = ffn_hidden
-    if moe_ffn_hidden is not None:
-        metadata["moe_ffn_hidden"] = moe_ffn_hidden
-    if layer_type_counts is not None:
-        metadata["layer_type_counts"] = layer_type_counts
-    if n_shared_experts is not None:
-        metadata["n_shared_experts"] = n_shared_experts
-    if num_heads is not None:
-        metadata["num_heads"] = num_heads
-    if kv_heads is not None:
-        metadata["kv_heads"] = kv_heads
-    if head_dim is not None:
-        metadata["head_dim"] = head_dim
 
+    # Force set metadata (overwrite existing keys)
     for key, val in metadata.items():
-        if key not in forward_graph.metadata:
-            forward_graph.metadata[key] = val
+        forward_graph.metadata[key] = val
     if backward_graph is not None:
         for key, val in metadata.items():
-            if key not in backward_graph.metadata:
-                backward_graph.metadata[key] = val
+            backward_graph.metadata[key] = val
 
     quant_cfg = QuantConfig(weight=quant, activation=quant) if quant else None
     ctx = TransformContext(
@@ -225,7 +210,6 @@ def estimate_training_from_graphs(
     dp_hidden_ms = pipeline_metrics.dp_hidden_ms if pipeline_metrics else 0.0
     optimizer_time_ms = pipeline_metrics.optimizer_time_ms if pipeline_metrics else 0.0
     optimizer_comm_ms = pipeline_metrics.optimizer_comm_ms if pipeline_metrics else 0.0
-    optimizer_comm_hidden_ms = pipeline_metrics.optimizer_comm_hidden_ms if pipeline_metrics else 0.0
 
     parallel = ctx.parallel
     training = ctx.training
@@ -274,7 +258,6 @@ def estimate_training_from_graphs(
         total_comm_volume_ms=total_comm_ms,
         optimizer_time_ms=optimizer_time_ms,
         optimizer_comm_ms=optimizer_comm_ms,
-        optimizer_comm_hidden_ms=optimizer_comm_hidden_ms,
     )
 
     if return_transformed:

@@ -89,13 +89,12 @@ def estimate_training_from_graphs(
     if model_type is not None:
         metadata["model_type"] = model_type
 
+    # Force set metadata (overwrite existing keys)
     for key, val in metadata.items():
-        if key not in forward_graph.metadata:
-            forward_graph.metadata[key] = val
+        forward_graph.metadata[key] = val
     if backward_graph is not None:
         for key, val in metadata.items():
-            if key not in backward_graph.metadata:
-                backward_graph.metadata[key] = val
+            backward_graph.metadata[key] = val
 
     quant_cfg = QuantConfig(weight=quant, activation=quant) if quant else None
     ctx = TransformContext(
@@ -200,6 +199,8 @@ def estimate_training_from_graphs(
     exposed_comm_ms = pipeline_metrics.exposed_comm_ms if pipeline_metrics else 0.0
     hidden_comm_ms = pipeline_metrics.hidden_comm_ms if pipeline_metrics else 0.0
     total_comm_ms = pipeline_metrics.total_comm_ms if pipeline_metrics else 0.0
+    optimizer_time_ms = pipeline_metrics.optimizer_time_ms if pipeline_metrics else 0.0
+    optimizer_comm_ms = pipeline_metrics.optimizer_comm_ms if pipeline_metrics else 0.0
 
     parallel = ctx.parallel
     training = ctx.training
@@ -244,6 +245,8 @@ def estimate_training_from_graphs(
         exposed_comm_ms=exposed_comm_ms,
         hidden_comm_ms=hidden_comm_ms,
         total_comm_volume_ms=total_comm_ms,
+        optimizer_time_ms=optimizer_time_ms,
+        optimizer_comm_ms=optimizer_comm_ms,
     )
 
     if return_transformed:

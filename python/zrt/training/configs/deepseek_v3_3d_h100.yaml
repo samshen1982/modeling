@@ -3,22 +3,19 @@ model: deepseek_v3
 
 system:
   hw: nvidia_h100_sxm
-  nodes: 32
+  nodes: 8
   gpus_per_node: 8
   host_mem_gb: 512
 
 strategy:
   tp: 8
   cp: 1
-  pp: 4
-  ep: 8
+  pp: 1
+  ep: 1
   dp: 8
   micro_batch: 1
   global_batch: 1024
   zero_stage: 1
-  optimizer: muon
-  ep_overlap: true
-  pp_schedule: dualpipev
   recompute:
     per_layer:
       moe: ["attn"]

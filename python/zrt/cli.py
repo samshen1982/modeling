@@ -737,6 +737,7 @@ def _run_estimate(config_path: str, output_path: str | None, *, breakdown: bool 
     from python.zrt.training.models.flops import op_cost as _op_cost, total_training_flops
     from python.zrt.training.io.excel_exporter import export_estimate_excel
     from python.zrt.training.io.html_exporter import export_estimate_html
+    from python.zrt.training.io.trace_exporter import export_estimate_trace
 
     try:
         model, system, strategy = load_specs(config_path)
@@ -771,6 +772,7 @@ def _run_estimate(config_path: str, output_path: str | None, *, breakdown: bool 
 
         excel_path = str(base_dir / f"{base_name}.xlsx")
         html_path = str(base_dir / f"{base_name}.html")
+        trace_path = str(base_dir / f"{base_name}.trace.json")
 
         export_estimate_excel(
             report=report, graph=graph, model=model,
@@ -785,6 +787,17 @@ def _run_estimate(config_path: str, output_path: str | None, *, breakdown: bool 
             op_costs=op_costs, output_path=html_path,
         )
         print(f"HTML report written to {html_path}")
+
+        export_estimate_trace(
+            report=report,
+            graph=graph,
+            model=model,
+            system=system,
+            strategy=strategy,
+            op_costs=op_costs,
+            output_path=trace_path,
+        )
+        print(f"Chrome trace written to {trace_path}")
 
         if breakdown:
             print()
@@ -805,8 +818,21 @@ def _run_estimate(config_path: str, output_path: str | None, *, breakdown: bool 
             system=system, strategy=strategy,
             op_costs=op_costs, output_path=f"{_default_base}.html",
         )
+
+        export_estimate_trace(
+            report=report,
+            graph=graph,
+            model=model,
+            system=system,
+            strategy=strategy,
+            op_costs=op_costs,
+            output_path=f"{_default_base}.trace.json",
+        )
+
         print(f"Excel report written to {_default_base}.xlsx")
         print(f"HTML report written to {_default_base}.html")
+        print(f"Chrome trace written to {_default_base}.trace.json")
+
         print()
         print(report_summary(report))
 
